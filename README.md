@@ -107,6 +107,19 @@ bun dev        # launch the TUI
 
 Requirements: Bun ≥ 1.3.14, Rust (rustup-managed toolchain).
 
+## Sponsor / 赞助
+
+If Nexus Agent saves you time, a coffee helps keep the project alive.
+
+如果 Nexus Agent 帮到了你,可以请作者喝杯咖啡。扫码即可:
+
+<p align="center">
+  <img src="./assets/sponsor-qr.jpg" alt="Sponsor QR Code" width="360">
+</p>
+
+> 二维码内含微信 / 支付宝收款码。Sponsorship is voluntary and never required —
+> the project stays MIT and open-source regardless.
+
 ## License
 
 MIT. See [LICENSE](./LICENSE) and [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).
