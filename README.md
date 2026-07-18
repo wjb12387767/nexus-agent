@@ -113,9 +113,7 @@ If Nexus Agent saves you time, a coffee helps keep the project alive.
 
 如果 Nexus Agent 帮到了你,可以请作者喝杯咖啡。扫码即可:
 
-<p align="center">
-  <img src="./assets/sponsor-qr.jpg" alt="Sponsor QR Code" width="360">
-</p>
+![Sponsor QR Code](assets/sponsor-qr.jpg)
 
 > 二维码内含微信 / 支付宝收款码。Sponsorship is voluntary and never required —
 > the project stays MIT and open-source regardless.
