@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+// Nexus Agent gRPC 协议。
+// 从 OpenClaude 的 openclaude.proto 移植而来：
+//   package openclaude.v1  -> nexus
+//   service AgentService   -> Nexus
+// 协议保持双向流式 Chat RPC，客户端发送任务/应答/取消，
+// 服务端流式返回文本 token、工具状态与权限请求。
+package nexus;
+
+// 主 Agent 服务
+service Nexus {
+  // 双向流：客户端发送任务与对 agent 提问的应答，
+  // 服务端流式返回文本 token、工具状态与权限请求。
+  rpc Chat(stream ClientMessage) returns (stream ServerMessage);
+}
+
+// ---------------------------------------------------------
+// 客户端消息（输入）
+// ---------------------------------------------------------
+message ClientMessage {
+  oneof payload {
+    // 1. 初始请求（流中的第一条消息）
+    ChatRequest request = 2;
+
+    // 2. 用户对 agent 提问的应答（例如命令确认）
+    UserInput input = 3;
+
+    // 3. 中断信号（用户点击"停止生成"）
+    CancelSignal cancel = 4;
+  }
+}
+
+message ChatRequest {
+  string message = 1;
+  string working_directory = 2; // agent 执行命令的工作目录
+  reserved 3;                   // 保留字段，防止误用
+  optional string model = 4;    // 指定模型（留空使用默认）
+  string session_id = 5;        // 非空 = 跨流会话持久化
+}
+
+message UserInput {
+  string reply = 1;       // 文本应答（例如 "y"、"no" 或澄清说明）
+  string prompt_id = 2;   // 所应答提问的 ID
+}
+
+message CancelSignal {
+  string reason = 1;
+}
+
+// ---------------------------------------------------------
+// 服务端消息（输出 / 事件）
+// ---------------------------------------------------------
+message ServerMessage {
+  // oneof 保证同一时刻只到达一种事件
+  oneof event {
+    TextChunk text_chunk = 1;            // 来自 LLM 的文本块
+    ToolCallStart tool_start = 2;        // agent 开始使用工具
+    ToolCallResult tool_result = 3;      // 工具返回结果
+    ActionRequired action_required = 4;  // agent 需要人工介入
+    FinalResponse done = 5;              // 生成成功完成
+    ErrorResponse error = 6;             // 发生严重错误
+  }
+}
+
+// 流式文本块
+message TextChunk {
+  string text = 1;
+}
+
+// agent 决定使用工具（bash、read_file 等）
+message ToolCallStart {
+  string tool_name = 1;
+  string arguments_json = 2; // JSON 格式的参数
+  string tool_use_id = 3;    // 关联 ID，与 ToolCallResult 匹配
+}
+
+// 工具执行结果
+message ToolCallResult {
+  string tool_name = 1;
+  string output = 2;      // stdout/stderr 或文件内容
+  bool is_error = 3;      // 命令本身是否失败
+  string tool_use_id = 4; // 关联 ID，与 ToolCallStart 匹配
+}
+
+// agent 暂停工作并等待用户决策
+message ActionRequired {
+  string prompt_id = 1;        // 客户端必须在 UserInput 中回传此 ID
+  string question = 2;         // 提问文本（例如 "执行 'rm -rf /'?"）
+  enum ActionType {
+    CONFIRM_COMMAND = 0;       // 是/否
+    REQUEST_INFORMATION = 1;   // 文本输入
+  }
+  ActionType type = 3;
+}
+
+// 最终统计
+message FinalResponse {
+  string full_text = 1;     // 完整的生成文本
+  int32 prompt_tokens = 2;
+  int32 completion_tokens = 3;
+}
+
+message ErrorResponse {
+  string message = 1;
+  string code = 2;
+}

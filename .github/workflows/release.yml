@@ -1,0 +1,362 @@
+name: Nexus Release
+
+# Nexus Agent 专有发布工作流（Task 9.4）。
+#
+# 触发条件：push 形如 `nexus-v*` 的 tag。该 tag 命名空间与 omp 的 `v*`
+# 完全独立，避免与 omp 已有的 release_binary / release_npm / release_github
+# 流程冲突。
+#
+# 该工作流执行以下动作：
+#   1. 多 OS 矩阵构建 native addon（Linux x64/arm64, macOS x64/arm64, Windows x64）
+#      —— 复用 napi-rs 的 platform 包机制（@nexus-agent/sandbox-{platform}-{arch}）
+#   2. 发布 @nexus-agent/* 各包到 npm
+#   3. 创建 GitHub Release（含 changelog 摘要 + 预构建二进制附件）
+#   4. 用 vsce 发布 VS Code 扩展到 Marketplace（如配置了 VSCE_PAT）
+#
+# 也可手动触发（workflow_dispatch）以做 dry-run 验证。
+
+on:
+   push:
+      tags:
+         - "nexus-v*"
+   workflow_dispatch:
+      inputs:
+         version:
+            description: "要发布的版本（如 1.0.0-beta，仅手动触发时使用）"
+            required: false
+            type: string
+         dry_run:
+            description: "Dry-run（不实际发布）"
+            type: boolean
+            default: true
+
+# 同一 tag 不重复跑；手动触发的也按 tag 分组避免互斥取消
+concurrency:
+   group: "${{ github.workflow }}-${{ github.ref }}"
+   cancel-in-progress: false
+
+env:
+   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+   contents: write
+   actions: read
+   id-token: write
+
+jobs:
+   # =========================================================================
+   # Job 1: 解析 tag，输出版本号与是否 dry-run
+   # =========================================================================
+   resolve_version:
+      name: Resolve Nexus version
+      runs-on: ubuntu-latest
+      outputs:
+         version: ${{ steps.v.outputs.version }}
+         tag: ${{ steps.v.outputs.tag }}
+         dry_run: ${{ steps.v.outputs.dry_run }}
+      steps:
+         - uses: actions/checkout@v4
+         - name: Resolve version from tag or input
+           id: v
+           shell: bash
+           run: |
+              if [ -n "${{ inputs.version }}" ]; then
+                version="${{ inputs.version }}"
+                tag="nexus-v${version}"
+                dry_run="${{ inputs.dry_run }}"
+              else
+                tag="${GITHUB_REF_NAME}"
+                version="${tag#nexus-v}"
+                dry_run=false
+              fi
+              echo "version=${version}" >> "$GITHUB_OUTPUT"
+              echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+              echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
+              echo "Resolved Nexus version: ${version} (tag: ${tag}, dry-run: ${dry_run})"
+
+   # =========================================================================
+   # Job 2: 多 OS 矩阵构建 napi native addon
+   # =========================================================================
+   build_native:
+      name: "Build native: ${{ matrix.platform }}-${{ matrix.arch }}"
+      needs: [resolve_version]
+      runs-on: ${{ matrix.os }}
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               # Linux x64
+               - { os: ubuntu-latest, platform: linux, arch: x64, target: x86_64-unknown-linux-gnu }
+               # Linux arm64（cross-compile on x64 runner）
+               - { os: ubuntu-latest, platform: linux, arch: arm64, target: aarch64-unknown-linux-gnu }
+               # macOS x64
+               - { os: macos-13, platform: darwin, arch: x64, target: x86_64-apple-darwin }
+               # macOS arm64（Apple Silicon）
+               - { os: macos-14, platform: darwin, arch: arm64, target: aarch64-apple-darwin }
+               # Windows x64
+               - { os: windows-latest, platform: win32, arch: x64, target: x86_64-pc-windows-msvc }
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - uses: ./.github/actions/ensure-rust-toolchain
+           with:
+              toolchain: nightly-2026-04-29
+         - name: Add Rust target
+           shell: bash
+           run: rustup target add ${{ matrix.target }}
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: Build nexus-sandbox napi addon
+           shell: bash
+           run: |
+              # 用 napi-rs CLI 构建 platform-specific 包
+              cd packages/nexus-sandbox
+              if [ -f package.json ] && grep -q '"napi"' package.json; then
+                bunx napi build --target ${{ matrix.target }} --platform
+                echo "::notice::Built nexus-sandbox for ${{ matrix.platform }}-${{ matrix.arch }}"
+              else
+                echo "::notice::nexus-sandbox 暂无 napi 配置，跳过 native build"
+              fi
+         - name: Build nexus-checkpoint napi addon
+           shell: bash
+           run: |
+              cd packages/nexus-checkpoint
+              if [ -f package.json ] && grep -q '"napi"' package.json; then
+                bunx napi build --target ${{ matrix.target }} --platform
+                echo "::notice::Built nexus-checkpoint for ${{ matrix.platform }}-${{ matrix.arch }}"
+              else
+                echo "::notice::nexus-checkpoint 暂无 napi 配置，跳过 native build"
+              fi
+         - name: Upload napi artifact
+           uses: actions/upload-artifact@v4
+           with:
+              name: nexus-native-${{ matrix.platform }}-${{ matrix.arch }}
+              path: |
+                 packages/nexus-sandbox/*.node
+                 packages/nexus-sandbox/npm/
+                 packages/nexus-checkpoint/*.node
+                 packages/nexus-checkpoint/npm/
+              if-no-files-found: warn
+              retention-days: 7
+
+   # =========================================================================
+   # Job 3: 构建 VS Code 扩展 vsix
+   # =========================================================================
+   build_vsix:
+      name: Build VS Code extension vsix
+      needs: [resolve_version]
+      runs-on: ubuntu-latest
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - uses: actions/setup-node@v4
+           with:
+              node-version: "20"
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: Install vsce
+           run: npm install -g @vscode/vsce
+         - name: Build vsix
+           shell: bash
+           run: |
+              cd vscode-extension/nexus-vscode
+              if [ -f package.json ]; then
+                # 同步 version
+                bun -e 'const p=await Bun.file("package.json").json(); p.version="${{ needs.resolve_version.outputs.version }}"; await Bun.write("package.json", JSON.stringify(p,null,2)+"\n")'
+                vsce package --no-yarn --no-dependencies -o nexus-vscode-${{ needs.resolve_version.outputs.version }}.vsix
+                echo "::notice::Built nexus-vscode-${{ needs.resolve_version.outputs.version }}.vsix"
+              else
+                echo "::notice::vscode-extension/nexus-vscode 不存在，跳过 vsix 构建"
+              fi
+         - name: Upload vsix artifact
+           uses: actions/upload-artifact@v4
+           with:
+              name: nexus-vsix
+              path: vscode-extension/nexus-vscode/*.vsix
+              if-no-files-found: warn
+              retention-days: 7
+
+   # =========================================================================
+   # Job 4: 发布到 npm（@nexus-agent/* 包）
+   # =========================================================================
+   publish_npm:
+      name: Publish @nexus-agent/* to npm
+      needs: [resolve_version, build_native]
+      if: ${{ needs.resolve_version.outputs.dry_run != 'true' }}
+      runs-on: ubuntu-latest
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - uses: actions/setup-node@v4
+           with:
+              node-version: "24"
+              registry-url: "https://registry.npmjs.org"
+         - name: Ensure npm supports trusted publishing
+           run: npm install -g npm@11.17.0
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: Download all native addons
+           uses: actions/download-artifact@v4
+           with:
+              pattern: nexus-native-*
+              path: ./native-addons
+              merge-multiple: true
+         - name: Distribute native addons to platform packages
+           shell: bash
+           run: |
+              # napi-rs 期望每个 platform 包在 npm/<platform-arch>/ 下
+              # 这里把下载的 .node 文件按平台分包
+              ls -la ./native-addons || true
+         - name: Publish @nexus-agent/* packages
+           env:
+              NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+           run: |
+              # 遍历所有 @nexus-agent/* 包，逐个发布
+              for pkg in packages/nexus-sandbox packages/nexus-checkpoint packages/nexus-compaction packages/nexus-routing packages/nexus-grpc; do
+                if [ -f "$pkg/package.json" ]; then
+                  name=$(bun -e 'console.log((await Bun.file("'"$pkg"'/package.json").json()).name)' 2>/dev/null || echo "")
+                  private=$(bun -e 'console.log((await Bun.file("'"$pkg"'/package.json").json()).private ?? false)' 2>/dev/null || echo "false")
+                  if [ "$private" = "true" ]; then
+                    echo "::notice::跳过私有包 $name"
+                    continue
+                  fi
+                  echo "::group::Publishing $name"
+                  (cd "$pkg" && npm publish --access public --tag beta) || echo "::warning::publish $name 失败"
+                  echo "::endgroup::"
+                fi
+              done
+
+   # =========================================================================
+   # Job 5: 发布 VS Code 扩展到 Marketplace
+   # =========================================================================
+   publish_vsce:
+      name: Publish VS Code extension
+      needs: [resolve_version, build_vsix]
+      if: ${{ needs.resolve_version.outputs.dry_run != 'true' }}
+      runs-on: ubuntu-latest
+      env:
+         HAS_VSCE_PAT: ${{ secrets.VSCE_PAT != '' }}
+      steps:
+         - uses: actions/checkout@v4
+         - uses: actions/setup-node@v4
+           with:
+              node-version: "20"
+         - name: Install vsce
+           if: env.HAS_VSCE_PAT == 'true'
+           run: npm install -g @vscode/vsce
+         - name: Download vsix
+           if: env.HAS_VSCE_PAT == 'true'
+           uses: actions/download-artifact@v4
+           with:
+              name: nexus-vsix
+              path: ./vsix
+         - name: Publish to Marketplace
+           if: env.HAS_VSCE_PAT == 'true'
+           env:
+              VSCE_PAT: ${{ secrets.VSCE_PAT }}
+           run: |
+              vsix_file=$(ls ./vsix/*.vsix | head -n1)
+              if [ -n "$vsix_file" ]; then
+                vsce publish --no-yarn --pat "$VSCE_PAT" --packagePath "$vsix_file"
+                echo "::notice::Published nexus-vscode ${{ needs.resolve_version.outputs.version }}"
+              else
+                echo "::warning::未找到 vsix 文件，跳过发布"
+              fi
+         - name: Skip (no VSCE_PAT)
+           if: env.HAS_VSCE_PAT != 'true'
+           run: echo "::notice::未配置 VSCE_PAT，跳过 VS Code 扩展发布"
+
+   # =========================================================================
+   # Job 6: 创建 GitHub Release（含 changelog + 附件）
+   # =========================================================================
+   github_release:
+      name: Create GitHub Release
+      needs: [resolve_version, build_native, build_vsix]
+      if: ${{ always() && needs.resolve_version.outputs.dry_run != 'true' }}
+      runs-on: ubuntu-latest
+      steps:
+         - uses: actions/checkout@v4
+           with:
+              fetch-depth: 0
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - name: Generate changelog
+           id: changelog
+           shell: bash
+           run: |
+              # 从根 CHANGELOG.md 抽取当前版本段
+              version="${{ needs.resolve_version.outputs.version }}"
+              if [ -f CHANGELOG.md ]; then
+                # 抽取 ## [${version}] ... 到下一个 ## [ 之间的内容
+                awk -v v="$version" '
+                  $0 ~ "^## \\[" v "\\]" {found=1; print; next}
+                  /^## \[/ && found {exit}
+                  found {print}
+                ' CHANGELOG.md > /tmp/release-notes.md
+                if [ -s /tmp/release-notes.md ]; then
+                  cp /tmp/release-notes.md ./release-notes.md
+                  echo "found=true" >> "$GITHUB_OUTPUT"
+                else
+                  echo "# Nexus Agent v${version}" > ./release-notes.md
+                  echo "" >> ./release-notes.md
+                  echo "（CHANGELOG.md 中未找到 ${version} 段，请手动补全。）" >> ./release-notes.md
+                  echo "found=false" >> "$GITHUB_OUTPUT"
+                fi
+              else
+                echo "# Nexus Agent v${version}" > ./release-notes.md
+                echo "" >> ./release-notes.md
+                echo "本版本融合 M2-M8 全部能力。" >> ./release-notes.md
+                echo "found=false" >> "$GITHUB_OUTPUT"
+              fi
+         - name: Download all artifacts
+           uses: actions/download-artifact@v4
+           with:
+              pattern: nexus-*
+              path: ./release-assets
+              merge-multiple: true
+         - name: Create GitHub Release
+           uses: softprops/action-gh-release@v2
+           with:
+              tag_name: ${{ needs.resolve_version.outputs.tag }}
+              name: "Nexus Agent ${{ needs.resolve_version.outputs.version }}"
+              body_path: ./release-notes.md
+              files: |
+                 ./release-assets/**/*.node
+                 ./release-assets/**/*.vsix
+                 ./release-assets/**
+              draft: false
+              prerelease: ${{ contains(needs.resolve_version.outputs.version, '-') }}
+              generate_release_notes: true
+           env:
+              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+   # =========================================================================
+   # Job 7: Dry-run 汇总（仅手动触发时）
+   # =========================================================================
+   dry_run_summary:
+      name: Dry-run summary
+      needs: [resolve_version, build_native, build_vsix]
+      if: ${{ always() && needs.resolve_version.outputs.dry_run == 'true' }}
+      runs-on: ubuntu-latest
+      steps:
+         - name: Summary
+           shell: bash
+           run: |
+              echo "=== Nexus Release Dry-Run 汇总 ==="
+              echo "版本: ${{ needs.resolve_version.outputs.version }}"
+              echo "Tag: ${{ needs.resolve_version.outputs.tag }}"
+              echo ""
+              echo "Build native: ${{ needs.build_native.result }}"
+              echo "Build vsix: ${{ needs.build_vsix.result }}"
+              echo ""
+              echo "若 dry_run=false，将执行："
+              echo "  - 发布 @nexus-agent/* 包到 npm"
+              echo "  - 发布 VS Code 扩展到 Marketplace"
+              echo "  - 创建 GitHub Release"

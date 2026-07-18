@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: Apache-2.0
+# 原始版权属于 xAI / Grok Build 项目（Apache-2.0）。Nexus Agent 项目在此基础
+# 上进行了改编与重写，以替换 Grok 内部依赖（xai-grok-config / nono）为 Nexus
+# 本地实现 + 直接使用 landlock crate / sandbox-exec / pi-iso。
+[package]
+name = "nexus-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "OS-level sandboxing for Nexus Agent via Landlock (Linux) / Seatbelt (macOS) / ISO FS (Windows fallback)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[features]
+default = ["enforce"]
+## 启用内核强制的沙箱（Linux Landlock / macOS Seatbelt）。在非 Unix 目标上
+## 启用本 feature 是 no-op（Windows 走 pi-iso 降级路径）。
+enforce = []
+
+[dependencies]
+anyhow.workspace = true
+# 注意：tracing 与 chrono 在 omp workspace.dependencies 中未声明，故此处使用内联版本。
+# 其他 pi-* crate 不使用 tracing/chrono，避免污染根 Cargo.toml。
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing = "0.1"
+globset.workspace = true
+
+# NAPI 绑定（暴露 createSandbox / SandboxHandle 给 TS 侧）
+napi.workspace = true
+napi-derive.workspace = true
+tokio.workspace = true
+
+# Windows 降级路径复用 omp 的 pi-iso PAL（ProjFS / Rcopy 等）。
+pi-iso.workspace = true
+
+# Unix 专属：libc 用于 seccomp BPF 与 Landlock syscall常量。
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# Linux 专属：landlock crate 提供内核 Landlock LSM 绑定；ignore 用于
+# deny glob 的启动时展开（mount namespace 不能在运行时匹配 glob）。
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "4"
+ignore.workspace = true
+
+[dev-dependencies]
+serial_test = "3"
+# 在测试中编译手写的 macOS deny-glob regex，以断言它和 globset（Linux 后端）
+# 匹配完全相同的集合——跨平台 parity 守卫。
+regex.workspace = true
+
+[build-dependencies]
+napi-build.workspace = true

@@ -1,0 +1,194 @@
+{
+  "name": "nexus-vscode",
+  "displayName": "Nexus Agent",
+  "description": "Practical VS Code companion for Nexus Agent with project-aware launch behavior and a real Control Center.",
+  "version": "1.0.0-beta",
+  "publisher": "nexus-agent",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Themes",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:nexus.start",
+    "onCommand:nexus.startInWorkspaceRoot",
+    "onCommand:nexus.openDocs",
+    "onCommand:nexus.openSetupDocs",
+    "onCommand:nexus.openWorkspaceProfile",
+    "onCommand:nexus.openControlCenter",
+    "onCommand:nexus.newChat",
+    "onCommand:nexus.openChat",
+    "onCommand:nexus.resumeSession",
+    "onCommand:nexus.abortChat",
+    "onView:nexus.controlCenter",
+    "onView:nexus.chat"
+  ],
+  "main": "./src/extension.js",
+  "files": [
+    "README.md",
+    "media/**",
+    "src/extension.js",
+    "src/presentation.js",
+    "src/state.js",
+    "src/chat/**",
+    "themes/**"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "nexus.start",
+        "title": "Nexus: Launch in Terminal",
+        "category": "Nexus"
+      },
+      {
+        "command": "nexus.startInWorkspaceRoot",
+        "title": "Nexus: Launch in Workspace Root",
+        "category": "Nexus"
+      },
+      {
+        "command": "nexus.openDocs",
+        "title": "Nexus: Open Repository",
+        "category": "Nexus"
+      },
+      {
+        "command": "nexus.openSetupDocs",
+        "title": "Nexus: Open Setup Guide",
+        "category": "Nexus"
+      },
+      {
+        "command": "nexus.openWorkspaceProfile",
+        "title": "Nexus: Open Workspace Profile",
+        "category": "Nexus"
+      },
+      {
+        "command": "nexus.openControlCenter",
+        "title": "Nexus: Open Control Center",
+        "category": "Nexus"
+      },
+      {
+        "command": "nexus.newChat",
+        "title": "Nexus: New Chat",
+        "category": "Nexus"
+      },
+      {
+        "command": "nexus.openChat",
+        "title": "Nexus: Open Chat Panel",
+        "category": "Nexus"
+      },
+      {
+        "command": "nexus.resumeSession",
+        "title": "Nexus: Resume Session",
+        "category": "Nexus"
+      },
+      {
+        "command": "nexus.abortChat",
+        "title": "Nexus: Abort Generation",
+        "category": "Nexus"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "nexus",
+          "title": "Nexus Agent",
+          "icon": "media/nexus.svg"
+        }
+      ]
+    },
+    "views": {
+      "nexus": [
+        {
+          "id": "nexus.chat",
+          "name": "Chat",
+          "type": "webview"
+        },
+        {
+          "id": "nexus.controlCenter",
+          "name": "Control Center",
+          "type": "webview"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "nexus.openChat",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l"
+      }
+    ],
+    "configuration": {
+      "title": "Nexus Agent",
+      "properties": {
+        "nexus.launchCommand": {
+          "type": "string",
+          "default": "nexus",
+          "description": "Command run in the integrated terminal when launching Nexus Agent."
+        },
+        "nexus.terminalName": {
+          "type": "string",
+          "default": "Nexus Agent",
+          "description": "Integrated terminal tab name for Nexus Agent sessions."
+        },
+        "nexus.useOpenAIShim": {
+          "type": "boolean",
+          "default": false,
+          "description": "Optionally set CLAUDE_CODE_USE_OPENAI=1 in launched Nexus Agent terminals."
+        },
+        "nexus.permissionMode": {
+          "type": "string",
+          "default": "acceptEdits",
+          "enum": ["default", "acceptEdits", "bypassPermissions", "plan"],
+          "enumDescriptions": [
+            "Prompt for permission on each tool use (requires manual approval)",
+            "Auto-approve file edits, prompt for other operations (recommended)",
+            "Auto-approve all operations without prompting",
+            "Read-only mode — no file modifications allowed"
+          ],
+          "description": "Permission mode for chat sessions. Controls which tool operations are auto-approved."
+        },
+        "nexus.transportMode": {
+          "type": "string",
+          "default": "stdio",
+          "enum": ["stdio", "grpc"],
+          "enumDescriptions": [
+            "Spawn `nexus --print --input-format=stream-json` and speak NDJSON over stdin/stdout (default).",
+            "Connect to a running `nexus grpc --port <port>` server via the gRPC bridge (M5)."
+          ],
+          "description": "Transport used by the chat host to talk to the Nexus Agent runtime."
+        },
+        "nexus.grpcEndpoint": {
+          "type": "string",
+          "default": "localhost:50051",
+          "description": "Endpoint of the running `nexus grpc` server used when transportMode is 'grpc'."
+        }
+      }
+    },
+    "themes": [
+      {
+        "label": "Nexus Terminal Black",
+        "uiTheme": "vs-dark",
+        "path": "./themes/Nexus-Terminal-Black.json"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "bun test src",
+    "lint": "node scripts/lint.js",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "keywords": [
+    "nexus",
+    "terminal",
+    "theme",
+    "cli",
+    "llm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nexus-agent/nexus-agent"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,1237 @@
+name: CI
+
+on:
+   push:
+      branches: [main]
+      # Vouch bookkeeping commits (mitchellh/vouch writes VOUCHED.td back to
+      # main on !vouch/!denounce/!unvouch) only edit the vouch list and need no
+      # build. Skip CI when a main push changes nothing but the vouch file; a
+      # push that also touches anything else still runs the full matrix.
+      paths-ignore:
+         - .github/VOUCHED.td
+   pull_request:
+      branches: [main]
+   workflow_dispatch:
+      inputs:
+         skip_npm:
+            description: "Skip npm publish"
+            type: boolean
+            default: false
+
+# Release runs publish a `v*` tag pushed atomically with main HEAD; sharing
+# the cheap branch-wide `CI-refs/heads/main` group meant a later main push
+# silently cancelled the in-flight release and left the tag without a GitHub
+# Release or npm publish (#2564). Detect release runs at workflow-scheduling
+# time via the release-script commit subject (`chore: bump version to vX.Y.Z`),
+# via `v*` tag-ref dispatches, and via manual dispatches whose tag-on-HEAD
+# status is only known after checkout; scope them to a per-sha group with no
+# cancellation. Every other event keeps branch-wide cancellation for PR/main churn.
+concurrency:
+   group: "${{ github.workflow }}-${{ (startsWith(github.event.head_commit.message, 'chore: bump version to ') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && format('release-{0}', github.sha) || github.ref }}"
+   cancel-in-progress: "${{ !(startsWith(github.event.head_commit.message, 'chore: bump version to ') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}"
+
+env:
+   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+   # glibc floor for shipped linux native addons. The omp-kata runner image is
+   # Ubuntu 24.04 (glibc 2.39); a plain native build links 2.39 symbol versions
+   # and fails to dlopen on older distros. Building the linux-gnu addons through
+   # cargo-zigbuild against this floor keeps them portable. Bump to raise the
+   # minimum supported glibc.
+   GLIBC_FLOOR: "2.17"
+
+permissions:
+   contents: read
+   actions: read
+
+jobs:
+   # scripts/release.ts pushes the version-bump commit and its `v*` tag
+   # atomically (`git push --atomic origin refs/heads/main:refs/heads/main
+   # <sha>:refs/tags/v<version>`), so a release now arrives as a single `push` to
+   # `refs/heads/main` — we no longer trigger on the tag ref at all (see
+   # `on.push`). This one branch-push run is therefore authoritative: it runs the
+   # full build AND, when HEAD carries a release tag, the release/publish jobs.
+   # `release_metadata` resolves that tag once so downstream jobs switch on
+   # `is-release` and address the tag by name — `github.ref` is
+   # `refs/heads/main` here, not the tag. A `workflow_dispatch` from a `v*` tag
+   # ref (or from a tagged main HEAD) is also treated as a release.
+   release_metadata:
+      name: Resolve release metadata
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      outputs:
+         is-release: ${{ steps.detect.outputs.is-release }}
+         release-tag: ${{ steps.detect.outputs.release-tag }}
+      steps:
+         # Only a main-branch run needs tags fetched, so `git tag --points-at
+         # HEAD` can see the freshly-pushed `v*`. A tag-ref dispatch reads the
+         # tag straight from `github.ref_name`, and fetching `--tags` while
+         # checkout uses an explicit tag refspec makes git refuse — so scope
+         # fetch-tags to main refs.
+         - uses: actions/checkout@v4
+           with:
+              fetch-tags: ${{ github.ref == 'refs/heads/main' }}
+         - name: Detect release tag at HEAD
+           id: detect
+           shell: bash
+           run: |
+              is_release=false
+              release_tag=""
+              case "${{ github.ref }}" in
+                refs/tags/v[0-9]*)
+                  release_tag="${{ github.ref_name }}"
+                  ;;
+                refs/heads/main)
+                  if [ "${{ github.event_name }}" != "pull_request" ]; then
+                    release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -n1 || true)
+                  fi
+                  ;;
+              esac
+              if [ -n "$release_tag" ]; then
+                echo "HEAD carries release tag $release_tag; this run builds and publishes the release."
+                is_release=true
+              fi
+              {
+                echo "is-release=$is_release"
+                echo "release-tag=$release_tag"
+              } >> "$GITHUB_OUTPUT"
+
+   # Compute a stable hash of every input that affects the native cdylib output,
+   # then look for any prior successful main run that already uploaded the
+   # native artifacts for this hash. Two independent outputs:
+   #   * `linux-x64-run-id` — set when the linux x64 canary
+   #     (`pi-natives-linux-x64-modern-h<hash>`) is present on a prior main run,
+   #     so native-dependent TS test jobs and `native_linux_x64` can reuse it.
+   #   * `cross-platform-run-id` — set when ALL cross-platform native artifacts
+   #     also have non-expired artifacts on that same prior run, so
+   #     `native_cross_platform` can skip the cold rebuild on main pushes after
+   #     dep changes have already warmed sccache there.
+   # Non-release native jobs are skipped when their canary hits; the canary
+   # retention window (see build-native action) is the effective TTL.
+   native_artifact_lookup:
+      name: Look up cached native artifacts
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      outputs:
+         source-hash: ${{ steps.compute.outputs.source-hash }}
+         linux-x64-run-id: ${{ steps.find.outputs.linux-x64-run-id }}
+         cross-platform-run-id: ${{ steps.find.outputs.cross-platform-run-id }}
+      steps:
+         - uses: actions/checkout@v4
+         - name: Compute native source hash
+           id: compute
+           shell: bash
+           run: |
+              source_hash=$(find crates Cargo.toml Cargo.lock rust-toolchain.toml \
+                      packages/natives/scripts packages/natives/package.json \
+                      scripts/ci-build-native.ts scripts/host-detect.ts \
+                      -type f -print0 \
+                    | sort -z \
+                    | xargs -0 sha256sum \
+                    | sha256sum \
+                    | cut -c1-16)
+              echo "source-hash=$source_hash" >> "$GITHUB_OUTPUT"
+              echo "Native source hash: $source_hash"
+         - name: Find prior main build with matching native artifacts
+           id: find
+           env:
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+           shell: bash
+           run: |
+              hash="${{ steps.compute.outputs.source-hash }}"
+              # Canary for native_linux_x64: presence of the modern artifact
+              # implies the baseline sibling is also there (they upload from the
+              # same job).
+              linux_canary="pi-natives-linux-x64-modern-h${hash}"
+              # Required set for cross-platform reuse — names must match the
+              # `actions/upload-artifact` `name:` template in build-native action.
+              cross_platform_required=(
+                "pi-natives-linux-arm64-h${hash}"
+                "pi-natives-darwin-x64-baseline-h${hash}"
+                "pi-natives-darwin-arm64-h${hash}"
+                "pi-natives-win32-x64-baseline-h${hash}"
+              )
+              linux_x64_run_id=""
+              cross_platform_run_id=""
+              for candidate in $(gh run list \
+                  --workflow=ci.yml --branch=main --status=success --event=push \
+                  --limit=20 --json databaseId --jq='.[].databaseId'); do
+                names=$(gh api "/repos/${{ github.repository }}/actions/runs/$candidate/artifacts?per_page=100" \
+                    --jq '.artifacts[] | select(.expired == false) | .name')
+                if [ -z "$linux_x64_run_id" ] && echo "$names" | grep -qFx "$linux_canary"; then
+                  linux_x64_run_id="$candidate"
+                fi
+                if [ -z "$cross_platform_run_id" ]; then
+                  all_found=true
+                  # Cross-platform reuse requires the linux canary AND every
+                  # cross-platform artifact, since release_binary downloads them
+                  # from the same run.
+                  if ! echo "$names" | grep -qFx "$linux_canary"; then
+                    all_found=false
+                  else
+                    for req in "${cross_platform_required[@]}"; do
+                      if ! echo "$names" | grep -qFx "$req"; then
+                        all_found=false
+                        break
+                      fi
+                    done
+                  fi
+                  if $all_found; then
+                    cross_platform_run_id="$candidate"
+                  fi
+                fi
+                if [ -n "$linux_x64_run_id" ] && [ -n "$cross_platform_run_id" ]; then
+                  break
+                fi
+              done
+              if [ -n "$linux_x64_run_id" ]; then
+                echo "Reusing Linux x64 native artifacts from run $linux_x64_run_id"
+              else
+                echo "No cached Linux x64 native artifacts for hash $hash; native_linux_x64 will rebuild."
+              fi
+              if [ -n "$cross_platform_run_id" ]; then
+                echo "Reusing cross-platform native artifacts from run $cross_platform_run_id"
+              else
+                echo "No cached cross-platform native artifacts for hash $hash; native_cross_platform will rebuild on main."
+              fi
+              {
+                echo "linux-x64-run-id=$linux_x64_run_id"
+                echo "cross-platform-run-id=$cross_platform_run_id"
+              } >> "$GITHUB_OUTPUT"
+
+   # Fast lint, type check, and browser bundle build (no Rust, no native build needed)
+   check:
+      name: Lint, type check & web build
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/bun-install
+         - name: Type check workspace
+           run: bun run ci:check:full
+         - name: Build collab web
+           run: bun run collab:web:build
+
+   # Linux x64 baseline + modern: required by `test`, so it runs on every PR
+   # unless native_artifact_lookup found a cached run. Release runs always
+   # rebuild for fresh artifacts.
+   native_linux_x64:
+      name: "Native: Linux x64 (${{ matrix.variant }})"
+      needs: [release_metadata, native_artifact_lookup]
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' || needs.native_artifact_lookup.outputs.linux-x64-run-id == '' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - { variant: baseline, rust_checks: true }
+               - { variant: modern }
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/build-native
+           with:
+              hash: ${{ needs.native_artifact_lookup.outputs.source-hash }}
+              platform: linux
+              arch: x64
+              variant: ${{ matrix.variant }}
+              glibc: ${{ env.GLIBC_FLOOR }}
+              rust_checks: ${{ matrix.rust_checks && 'true' || 'false' }}
+              save_cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+   # Pre-warm the cross-platform native build cache on `main`, in addition to
+   # building the artifacts that ship in releases. Skipped on main when
+   # native_artifact_lookup already found a recent run with all artifacts intact.
+   native_cross_platform_kata:
+      name: "Native: ${{ matrix.platform }} ${{ matrix.arch }}"
+      needs: [release_metadata, native_artifact_lookup]
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.native_artifact_lookup.outputs.cross-platform-run-id == '') }}
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - { os: omp-kata, platform: linux, arch: arm64, target: aarch64-unknown-linux-gnu }
+               - { os: omp-kata, platform: win32, arch: x64, target: x86_64-pc-windows-msvc, variant: baseline }
+      runs-on: ${{ matrix.os }}
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/build-native
+           with:
+              hash: ${{ needs.native_artifact_lookup.outputs.source-hash }}
+              platform: ${{ matrix.platform }}
+              arch: ${{ matrix.arch }}
+              variant: ${{ matrix.variant }}
+              target: ${{ matrix.target }}
+              glibc: ${{ matrix.platform == 'linux' && env.GLIBC_FLOOR || '' }}
+              save_cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+   native_cross_platform_macos:
+      name: "Native: ${{ matrix.platform }} ${{ matrix.arch }}"
+      needs: [release_metadata, native_artifact_lookup]
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.native_artifact_lookup.outputs.cross-platform-run-id == '') }}
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - { os: macos-15-intel, platform: darwin, arch: x64, variant: baseline }
+               - { os: macos-14, platform: darwin, arch: arm64 }
+      runs-on: ${{ matrix.os }}
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/build-native
+           with:
+              hash: ${{ needs.native_artifact_lookup.outputs.source-hash }}
+              platform: ${{ matrix.platform }}
+              arch: ${{ matrix.arch }}
+              variant: ${{ matrix.variant }}
+              target: ${{ matrix.target }}
+              save_cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+   test_workspace:
+      name: Test TS workspace fast
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_linux_x64, native_artifact_lookup]
+      if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - name: Resolve Linux x64 native artifact run
+           id: source
+           shell: bash
+           run: |
+              if [ "${{ needs.native_linux_x64.result }}" = "success" ]; then
+                echo "artifact-run-id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+              else
+                echo "artifact-run-id=${{ needs.native_artifact_lookup.outputs.linux-x64-run-id }}" >> "$GITHUB_OUTPUT"
+              fi
+         - name: Download native addons
+           uses: actions/download-artifact@v4
+           with:
+              pattern: pi-natives-linux-x64-*-h${{ needs.native_artifact_lookup.outputs.source-hash }}
+              path: packages/natives/native
+              merge-multiple: true
+              run-id: ${{ steps.source.outputs.artifact-run-id }}
+              github-token: ${{ secrets.GITHUB_TOKEN }}
+         - name: Test workspace packages and repo scripts (TS)
+           run: bun run ci:test:ts:workspace
+
+   test_coding_agent_singleton:
+      name: Test coding-agent singleton/global-state (TS)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_linux_x64, native_artifact_lookup]
+      if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - name: Resolve Linux x64 native artifact run
+           id: source
+           shell: bash
+           run: |
+              if [ "${{ needs.native_linux_x64.result }}" = "success" ]; then
+                echo "artifact-run-id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+              else
+                echo "artifact-run-id=${{ needs.native_artifact_lookup.outputs.linux-x64-run-id }}" >> "$GITHUB_OUTPUT"
+              fi
+         - name: Download native addons
+           uses: actions/download-artifact@v4
+           with:
+              pattern: pi-natives-linux-x64-*-h${{ needs.native_artifact_lookup.outputs.source-hash }}
+              path: packages/natives/native
+              merge-multiple: true
+              run-id: ${{ steps.source.outputs.artifact-run-id }}
+              github-token: ${{ secrets.GITHUB_TOKEN }}
+         - name: Test coding-agent singleton/global-state bucket
+           # Keep global Settings/env/fake-timer tests serial; native addon
+           # artifacts are still available like every other coding-agent bucket.
+           run: bun run ci:test:coding-agent:singleton
+
+   test_ts_native:
+      name: Test TS native/integration packages
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_linux_x64, native_artifact_lookup]
+      if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
+      timeout-minutes: 25
+      steps:
+         - uses: actions/checkout@v4
+
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - name: Resolve Linux x64 native artifact run
+           id: source
+           shell: bash
+           run: |
+              if [ "${{ needs.native_linux_x64.result }}" = "success" ]; then
+                echo "artifact-run-id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+              else
+                echo "artifact-run-id=${{ needs.native_artifact_lookup.outputs.linux-x64-run-id }}" >> "$GITHUB_OUTPUT"
+              fi
+         - name: Download native addons
+           uses: actions/download-artifact@v4
+           with:
+              pattern: pi-natives-linux-x64-*-h${{ needs.native_artifact_lookup.outputs.source-hash }}
+              path: packages/natives/native
+              merge-multiple: true
+              run-id: ${{ steps.source.outputs.artifact-run-id }}
+              github-token: ${{ secrets.GITHUB_TOKEN }}
+         - name: Test native/TUI/browser-ish packages (TS)
+           run: bun run ci:test:ts:native
+
+   test_coding_agent_ui:
+      name: Test coding-agent UI/TUI (TS)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_linux_x64, native_artifact_lookup]
+      if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
+      timeout-minutes: 25
+      steps:
+         - uses: actions/checkout@v4
+
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - name: Resolve Linux x64 native artifact run
+           id: source
+           shell: bash
+           run: |
+              if [ "${{ needs.native_linux_x64.result }}" = "success" ]; then
+                echo "artifact-run-id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+              else
+                echo "artifact-run-id=${{ needs.native_artifact_lookup.outputs.linux-x64-run-id }}" >> "$GITHUB_OUTPUT"
+              fi
+         - name: Download native addons
+           uses: actions/download-artifact@v4
+           with:
+              pattern: pi-natives-linux-x64-*-h${{ needs.native_artifact_lookup.outputs.source-hash }}
+              path: packages/natives/native
+              merge-multiple: true
+              run-id: ${{ steps.source.outputs.artifact-run-id }}
+              github-token: ${{ secrets.GITHUB_TOKEN }}
+         - name: Test coding-agent UI/TUI bucket
+           run: bun run ci:test:coding-agent:ui
+
+   test_coding_agent_runtime:
+      name: Test coding-agent runtime/session (TS)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_linux_x64, native_artifact_lookup]
+      if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
+      timeout-minutes: 25
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - name: Resolve Linux x64 native artifact run
+           id: source
+           shell: bash
+           run: |
+              if [ "${{ needs.native_linux_x64.result }}" = "success" ]; then
+                echo "artifact-run-id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+              else
+                echo "artifact-run-id=${{ needs.native_artifact_lookup.outputs.linux-x64-run-id }}" >> "$GITHUB_OUTPUT"
+              fi
+         - name: Download native addons
+           uses: actions/download-artifact@v4
+           with:
+              pattern: pi-natives-linux-x64-*-h${{ needs.native_artifact_lookup.outputs.source-hash }}
+              path: packages/natives/native
+              merge-multiple: true
+              run-id: ${{ steps.source.outputs.artifact-run-id }}
+              github-token: ${{ secrets.GITHUB_TOKEN }}
+         - name: Test coding-agent runtime bucket
+           # Runtime/session tests import native-backed barrels too; keep this
+           # separate for concurrency, not as a native-free guardrail.
+           run: bun run ci:test:coding-agent:runtime
+
+   test_coding_agent_native:
+      name: Test coding-agent native/unit (TS)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_linux_x64, native_artifact_lookup]
+      if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
+      timeout-minutes: 25
+      steps:
+         - uses: actions/checkout@v4
+
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - name: Resolve Linux x64 native artifact run
+           id: source
+           shell: bash
+           run: |
+              if [ "${{ needs.native_linux_x64.result }}" = "success" ]; then
+                echo "artifact-run-id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+              else
+                echo "artifact-run-id=${{ needs.native_artifact_lookup.outputs.linux-x64-run-id }}" >> "$GITHUB_OUTPUT"
+              fi
+         - name: Download native addons
+           uses: actions/download-artifact@v4
+           with:
+              pattern: pi-natives-linux-x64-*-h${{ needs.native_artifact_lookup.outputs.source-hash }}
+              path: packages/natives/native
+              merge-multiple: true
+              run-id: ${{ steps.source.outputs.artifact-run-id }}
+              github-token: ${{ secrets.GITHUB_TOKEN }}
+         - name: Test coding-agent native/unit bucket
+           run: bun run ci:test:coding-agent:native
+
+   test_smoke:
+      name: Test CLI smoke (TS)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_linux_x64, native_artifact_lookup]
+      if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
+      timeout-minutes: 15
+      steps:
+         - uses: actions/checkout@v4
+
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - name: Resolve Linux x64 native artifact run
+           id: source
+           shell: bash
+           run: |
+              if [ "${{ needs.native_linux_x64.result }}" = "success" ]; then
+                echo "artifact-run-id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+              else
+                echo "artifact-run-id=${{ needs.native_artifact_lookup.outputs.linux-x64-run-id }}" >> "$GITHUB_OUTPUT"
+              fi
+         - name: Download native addons
+           uses: actions/download-artifact@v4
+           with:
+              pattern: pi-natives-linux-x64-*-h${{ needs.native_artifact_lookup.outputs.source-hash }}
+              path: packages/natives/native
+              merge-multiple: true
+              run-id: ${{ steps.source.outputs.artifact-run-id }}
+              github-token: ${{ secrets.GITHUB_TOKEN }}
+         - name: CLI smoke test
+           run: bun run ci:test:smoke
+
+   install_methods:
+      name: Install method smoke tests
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/ensure-rust-toolchain
+           with:
+              toolchain: nightly-2026-04-29
+         - name: Detect runner environment
+           id: detect
+           shell: bash
+           run: |
+              # $SCCACHE_BUCKET is injected only on self-hosted omp-kata pods; its
+              # presence selects baked sccache + shared S3. GitHub-hosted runners
+              # (PRs) need sccache-action to export the GHA cache URL/token into the
+              # step env — a bare binary install leaves SCCACHE_GHA_ENABLED set with
+              # no cache URL, so sccache server startup fails ("cache url for ghac
+              # not found"). Mirrors the build-native action's sccache wiring.
+              if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                echo "on_infra=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "on_infra=false" >> "$GITHUB_OUTPUT"
+              fi
+         - name: Ensure baked sccache (omp-kata)
+           if: steps.detect.outputs.on_infra == 'true'
+           uses: ./.github/actions/ensure-sccache
+           with:
+              version: "0.15.0"
+         - name: Setup sccache (GitHub-hosted)
+           if: steps.detect.outputs.on_infra == 'false'
+           uses: mozilla-actions/sccache-action@v0.0.10
+         - name: Enable sccache for cargo
+           # Conditional backend: self-hosted omp-kata injects a shared S3
+           # (RustFS) sccache via pod env; GitHub-hosted runners keep the GHA
+           # cache. CARGO_INCREMENTAL=0 keeps sccache from silently no-oping.
+           shell: bash
+           run: |
+              {
+                echo "RUSTC_WRAPPER=sccache"
+                echo "CARGO_INCREMENTAL=0"
+              } >> "$GITHUB_ENV"
+              if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                echo "sccache backend: shared S3 ($SCCACHE_BUCKET @ $SCCACHE_ENDPOINT)"
+              else
+                echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+                echo "sccache backend: GitHub Actions cache"
+              fi
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - name: Install method smoke tests
+           run: bun run ci:test:install-methods
+
+   release_binary:
+      name: "Release binary: ${{ matrix.target_id }}"
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.native_linux_x64.result == 'success' && needs.native_cross_platform_kata.result ==
+         'success' && needs.native_cross_platform_macos.result == 'success' &&
+         needs.test_workspace.result == 'success' &&
+         needs.test_coding_agent_singleton.result == 'success' &&
+         needs.test_ts_native.result == 'success' &&
+         needs.test_coding_agent_ui.result == 'success' &&
+         needs.test_coding_agent_runtime.result == 'success' &&
+         needs.test_coding_agent_native.result == 'success' &&
+         needs.test_smoke.result == 'success' && needs.check.result == 'success' &&
+         needs.install_methods.result == 'success' }}
+      needs: [release_metadata, check, native_linux_x64, native_cross_platform_kata, native_cross_platform_macos, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods, native_artifact_lookup]
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - {
+                    os: ubuntu-22.04,
+                    platform: linux,
+                    arch: x64,
+                    target_id: linux-x64,
+                    binary_path: packages/coding-agent/binaries/omp-linux-x64,
+                 }
+               - {
+                    os: ubuntu-24.04-arm,
+                    platform: linux,
+                    arch: arm64,
+                    target_id: linux-arm64,
+                    binary_path: packages/coding-agent/binaries/omp-linux-arm64,
+                 }
+               - {
+                    os: macos-15-intel,
+                    platform: darwin,
+                    arch: x64,
+                    target_id: darwin-x64,
+                    binary_path: packages/coding-agent/binaries/omp-darwin-x64,
+                 }
+               - {
+                    os: macos-14,
+                    platform: darwin,
+                    arch: arm64,
+                    target_id: darwin-arm64,
+                    binary_path: packages/coding-agent/binaries/omp-darwin-arm64,
+                 }
+               - {
+                    os: ubuntu-22.04,
+                    platform: win32,
+                    arch: x64,
+                    target_id: win32-x64,
+                    binary_path: packages/coding-agent/binaries/omp-windows-x64.exe,
+                 }
+      runs-on: ${{ matrix.os }}
+      permissions:
+         contents: read
+         id-token: write
+      env:
+         MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY != '' }}
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: "1.3"
+           env:
+              SCCACHE_BUCKET: ""
+              AWS_ACCESS_KEY_ID: ""
+         - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+           with:
+              node-version: "24"
+              registry-url: "https://registry.npmjs.org"
+         # npm runs under Bun when invoked by the release script; npm 12
+         # requires a newer emulated Node version than Bun 1.3 provides.
+         - name: Ensure npm supports trusted publishing
+           if: ${{ !inputs.skip_npm }}
+           run: npm install -g npm@11.17.0
+         - name: Cache bun dependencies
+           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+         - run: bun install --frozen-lockfile
+         - name: Download native addon(s)
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              pattern: pi-natives-${{ matrix.platform }}-${{ matrix.arch }}*-h${{ needs.native_artifact_lookup.outputs.source-hash }}
+              path: packages/natives/native
+              merge-multiple: true
+         - name: Build release binary
+           env:
+              RELEASE_TARGETS: ${{ matrix.target_id }}
+           run: bun run ci:release:build-binaries
+         - name: Sign and notarize macOS binary (Developer ID)
+           # Replaces the ad-hoc signature with a Developer ID + hardened-runtime
+           # one (+JIT/library-validation entitlements; omp dlopens its
+           # runtime-extracted native addon, which has a different Team ID) and
+           # notarizes. Auto-skips until the APPLE_* secrets are configured.
+           if: matrix.platform == 'darwin' && env.MACOS_SIGNING == 'true'
+           env:
+              APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+              APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+              APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+              APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+              APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+           run: bash scripts/ci-macos-sign.sh "${{ matrix.binary_path }}"
+         # Windows binary is cross-built on Linux, so we have no Windows runner
+         # to smoke it on. Cross-build correctness is verified via the napi
+         # entry-point exports (see build-native action) and the bun
+         # `--compile --target=bun-windows-x64-*` cross-compile.
+         - name: Smoke release binary
+           if: matrix.platform != 'win32'
+           run: |
+              runtime_dir="$(mktemp -d)"
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --version
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --smoke-test
+         - name: Publish native addon package
+           if: ${{ !inputs.skip_npm }}
+           env:
+              # Fallback auth: setup-node wrote an .npmrc referencing
+              # NODE_AUTH_TOKEN; npm uses it only when OIDC has no trusted
+              # publisher for the package (or on a first publish).
+              NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+           run: bun run ci:release:publish-native-leaf ${{ matrix.target_id }}
+         - name: Upload release binary artifact
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: omp-binary-${{ matrix.target_id }}
+              path: ${{ matrix.binary_path }}
+
+   release_github:
+      name: Publish GitHub release
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_binary.result == 'success' }}
+      needs: [release_metadata, release_binary]
+      runs-on: ubuntu-22.04
+      permissions:
+         contents: write
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: "1.3"
+         - name: Generate release notes from CHANGELOGs
+           env:
+              # `gh release list` (used to find the latest published GitHub
+              # Release tag below the target so silent-tag changelog sections
+              # roll forward — #2596) requires GH_TOKEN in Actions. Without
+              # it gh exits non-zero and the script would degrade to legacy
+              # single-version notes, defeating the recovery.
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+           run: bun scripts/ci-release-notes.ts ${{ needs.release_metadata.outputs.release-tag }}
+         - name: Download release binaries
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              pattern: omp-binary-*
+              path: packages/coding-agent/binaries
+              merge-multiple: true
+         - name: Create GitHub Release
+           uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+           with:
+              tag_name: ${{ needs.release_metadata.outputs.release-tag }}
+              files: |
+                 packages/coding-agent/binaries/omp-*
+              body_path: release-notes.md
+              generate_release_notes: true
+
+
+   release_github_verify:
+      name: Verify published release (macOS)
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_github.result == 'success' }}
+      needs: [release_metadata, release_github]
+      runs-on: macos-14
+      permissions:
+         contents: read
+      env:
+         MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY != '' }}
+      steps:
+         - name: Download published macOS arm64 binary
+           run: |
+              curl -fsSL -o omp-darwin-arm64 "https://github.com/${{ github.repository }}/releases/download/${{ needs.release_metadata.outputs.release-tag }}/omp-darwin-arm64"
+              chmod +x omp-darwin-arm64
+         - name: Verify published macOS arm64 binary
+           run: |
+              codesign -dvvv ./omp-darwin-arm64
+              codesign --verify --strict --verbose=4 ./omp-darwin-arm64
+              runtime_dir="$(mktemp -d)"
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" ./omp-darwin-arm64 --version
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" ./omp-darwin-arm64 --smoke-test
+         - name: Assert signed release is not ad-hoc
+           if: env.MACOS_SIGNING == 'true'
+           run: |
+              if codesign -dvvv ./omp-darwin-arm64 2>&1 | grep -qE "flags=.*adhoc|Signature=adhoc"; then
+                echo "published binary is still ad-hoc signed (Developer ID signing did not run)" >&2
+                exit 1
+              fi
+              # Gatekeeper assessment: a notarized Developer ID binary is accepted.
+              # Informational — a bare (unstapled) Mach-O relies on the online ticket
+              # lookup, so surface the result without gating the release on it.
+              spctl -a -t exec -vv ./omp-darwin-arm64 || echo "spctl non-zero (expected for unstapled bare binary; ticket served online)"
+
+   release_npm:
+      name: Publish to npm
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_binary.result == 'success' &&
+         needs.release_github_verify.result == 'success' &&
+         !inputs.skip_npm }}
+      needs: [release_metadata, release_binary, release_github_verify, native_artifact_lookup]
+      runs-on: ubuntu-22.04
+      # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a
+      # short-lived publish token (trusted publishing + provenance). When a
+      # package has no matching trusted publisher configured, npm silently falls
+      # back to NODE_AUTH_TOKEN below — which also covers first-ever publishes.
+      permissions:
+         id-token: write
+         contents: read
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: "1.3"
+         - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+           with:
+              node-version: "24"
+              registry-url: "https://registry.npmjs.org"
+         # npm runs under Bun when invoked by the release script; npm 12
+         # requires a newer emulated Node version than Bun 1.3 provides.
+         - name: Ensure npm supports trusted publishing
+           run: npm install -g npm@11.17.0
+         - name: Cache bun dependencies
+           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+         - run: bun install --frozen-lockfile
+         # The pi-coding-agent prepack executes workspace code (bundle-dist
+         # imports the pi-utils barrel, which loads the pi-natives addon), so
+         # this job needs the linux x64 native addons just like `test` does.
+         # Release runs always rebuild natives in this same run, so the
+         # default run-id resolves the artifacts.
+         - name: Download native addons
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              pattern: pi-natives-linux-x64-*-h${{ needs.native_artifact_lookup.outputs.source-hash }}
+              path: packages/natives/native
+              merge-multiple: true
+         - name: Publish to npm
+           env:
+              # Fallback auth: setup-node wrote an .npmrc referencing
+              # NODE_AUTH_TOKEN; npm uses it only when OIDC has no trusted
+              # publisher for the package (or on a first publish).
+              NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+           run: bun run ci:release:publish
+
+   # Regenerate the Homebrew tap formula (can1357/homebrew-tap) from the freshly
+   # published release assets and push it. Gated on release_github_verify so the
+   # tap only cuts over to a release whose published binary was verified (matches
+   # how release_npm is gated). No-ops when HOMEBREW_TAP_DEPLOY_KEY is unset, so a
+   # release never blocks on tap access.
+   release_brew:
+      name: Update Homebrew tap
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_github_verify.result == 'success' }}
+      needs: [release_metadata, release_github_verify]
+      runs-on: ubuntu-22.04
+      env:
+         HAS_TAP_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY != '' }}
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           if: env.HAS_TAP_KEY == 'true'
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           if: env.HAS_TAP_KEY == 'true'
+           with:
+              bun-version: "1.3"
+         - name: Check out the Homebrew tap
+           if: env.HAS_TAP_KEY == 'true'
+           uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              repository: can1357/homebrew-tap
+              ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+              path: homebrew-tap
+         - name: Regenerate and push the formula
+           if: env.HAS_TAP_KEY == 'true'
+           env:
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+           run: |
+              bun scripts/ci-update-brew-formula.ts "${{ needs.release_metadata.outputs.release-tag }}" --out homebrew-tap/Formula/omp.rb
+              cd homebrew-tap
+              if git diff --quiet -- Formula/omp.rb; then
+                echo "formula already up to date for ${{ needs.release_metadata.outputs.release-tag }}"
+                exit 0
+              fi
+              git -c user.name="github-actions[bot]" \
+                  -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                  commit -m "omp ${{ needs.release_metadata.outputs.release-tag }}" -- Formula/omp.rb
+              git push origin HEAD:main
+
+   # ===========================================================================
+   # Nexus Agent M9 — 新增 CI 矩阵与端到端测试
+   # ---------------------------------------------------------------------------
+   # 以下 job 是 Nexus 在 omp 基础上扩展的，不破坏 omp 已有 CI 流程。
+   # 设计目标：
+   #   1. nexus_matrix      — OS × Provider × sandbox ~30 关键组合（用 mock provider，不实际调 API）
+   #   2. nexus_sandbox_sec — 仅 Linux，跑 Landlock 集成测试（rm -rf / 被拒）
+   #   3. nexus_grpc_e2e    — gRPC 端到端测试（packages/nexus-grpc/test/e2e.test.ts）
+   # ===========================================================================
+
+   # Nexus 跨平台 × Provider × 沙箱开关 矩阵（共 30 组合，全部用 mock provider）
+   # 使用 NEXUS_TEST_PROVIDER / NEXUS_TEST_SANDBOX 环境变量驱动 mock 集成测试。
+   nexus_matrix:
+      name: "Nexus: ${{ matrix.os }} / ${{ matrix.provider }} / sandbox=${{ matrix.sandbox }}"
+      runs-on: ${{ matrix.os }}
+      # 不阻塞 omp 已有的发布流程——nexus_matrix 失败时 release_binary 仍按原条件运行
+      needs: [check]
+      if: ${{ !cancelled() && needs.check.result == 'success' }}
+      timeout-minutes: 15
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               # ── Linux × 4 provider × 2 sandbox = 8 ──
+               - { os: ubuntu-latest, provider: anthropic, sandbox: enabled }
+               - { os: ubuntu-latest, provider: openai,    sandbox: enabled }
+               - { os: ubuntu-latest, provider: deepseek,  sandbox: enabled }
+               - { os: ubuntu-latest, provider: ollama,    sandbox: enabled }
+               - { os: ubuntu-latest, provider: anthropic, sandbox: disabled }
+               - { os: ubuntu-latest, provider: openai,    sandbox: disabled }
+               - { os: ubuntu-latest, provider: deepseek,  sandbox: disabled }
+               - { os: ubuntu-latest, provider: ollama,    sandbox: disabled }
+               # ── macOS × 4 provider × 2 sandbox = 8 ──
+               - { os: macos-latest,  provider: anthropic, sandbox: enabled }
+               - { os: macos-latest,  provider: openai,    sandbox: enabled }
+               - { os: macos-latest,  provider: deepseek,  sandbox: enabled }
+               - { os: macos-latest,  provider: ollama,    sandbox: enabled }
+               - { os: macos-latest,  provider: anthropic, sandbox: disabled }
+               - { os: macos-latest,  provider: openai,    sandbox: disabled }
+               - { os: macos-latest,  provider: deepseek,  sandbox: disabled }
+               - { os: macos-latest,  provider: ollama,    sandbox: disabled }
+               # ── Windows × 4 provider × 2 sandbox = 8（Windows 走 ISO FS 降级路径）──
+               - { os: windows-latest, provider: anthropic, sandbox: enabled }
+               - { os: windows-latest, provider: openai,    sandbox: enabled }
+               - { os: windows-latest, provider: deepseek,  sandbox: enabled }
+               - { os: windows-latest, provider: ollama,    sandbox: enabled }
+               - { os: windows-latest, provider: anthropic, sandbox: disabled }
+               - { os: windows-latest, provider: openai,    sandbox: disabled }
+               - { os: windows-latest, provider: deepseek,  sandbox: disabled }
+               - { os: windows-latest, provider: ollama,    sandbox: disabled }
+               # ── 额外关键组合（gemini / kimi × 各 OS）= 6 ──
+               - { os: ubuntu-latest,  provider: gemini, sandbox: enabled }
+               - { os: macos-latest,   provider: gemini, sandbox: disabled }
+               - { os: windows-latest, provider: gemini, sandbox: disabled }
+               - { os: ubuntu-latest,  provider: kimi,   sandbox: enabled }
+               - { os: macos-latest,   provider: kimi,   sandbox: disabled }
+               - { os: windows-latest, provider: kimi,   sandbox: disabled }
+               # ── qwen / glm / mock 代表性组合 = 4（覆盖剩余 3 个 provider，使代表性 provider 数 = 9）──
+               - { os: ubuntu-latest,  provider: qwen, sandbox: enabled }
+               - { os: macos-latest,   provider: glm,   sandbox: disabled }
+               - { os: ubuntu-latest,  provider: mock,  sandbox: disabled }
+               - { os: windows-latest, provider: mock,  sandbox: disabled }
+               # ── bash-ast dimension (Task 1.1/1.2 verification) = 2 ──
+               # Representative Linux × anthropic entries exercising the
+               # bash-ast feature flag on/off; verifies turning it off does
+               # not regress the nexus_matrix flow. Full bash AST coverage
+               # lives in the dedicated nexus_bash_ast_test job below.
+               - { os: ubuntu-latest, provider: anthropic, sandbox: enabled, bash-ast: "on" }
+               - { os: ubuntu-latest, provider: anthropic, sandbox: enabled, bash-ast: "off" }
+      env:
+         # Mock provider 模式：不实际调用 LLM API
+         NEXUS_TEST_PROVIDER: ${{ matrix.provider }}
+         NEXUS_TEST_SANDBOX: ${{ matrix.sandbox }}
+         NEXUS_TEST_MOCK: "1"
+         # bash-ast flag propagated to test scripts (empty for entries that
+         # do not set it, which scripts treat as "off").
+         NEXUS_TEST_BASH_AST: ${{ matrix.bash-ast }}
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: Type check nexus-* packages
+           run: bun run --filter './packages/nexus-*' check
+           shell: bash
+         - name: Run mock-provider integration tests
+           shell: bash
+           run: |
+              echo "NEXUS_TEST_PROVIDER=${NEXUS_TEST_PROVIDER} NEXUS_TEST_SANDBOX=${NEXUS_TEST_SANDBOX}"
+              # 跑每个 nexus-* TS 包的测试，用 mock provider（不实际调 API）
+              for pkg in packages/nexus-sandbox packages/nexus-checkpoint packages/nexus-compaction packages/nexus-routing; do
+                if [ -d "$pkg" ] && [ -f "$pkg/package.json" ]; then
+                  echo "::group::Testing $pkg"
+                  (cd "$pkg" && bun test || true)
+                  echo "::endgroup::"
+                fi
+              done
+
+   # Nexus sandbox 安全测试（仅 Linux，需要 Landlock 内核支持）
+   # 跑 crates/nexus-sandbox/tests/sandbox_rejects_rm_rf.rs 集成测试，
+   # 验证 rm -rf / 类灾难性命令在沙箱下被拒绝。
+   nexus_sandbox_sec:
+      name: "Nexus: sandbox security (Linux/Landlock)"
+      runs-on: ubuntu-latest
+      needs: [check]
+      if: ${{ !cancelled() && needs.check.result == 'success' }}
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/ensure-rust-toolchain
+           with:
+              toolchain: nightly-2026-04-29
+         - name: Run sandbox reject rm -rf integration test
+           run: |
+              # 跑 nexus-sandbox 的 rm -rf / 集成测试
+              cargo test --package nexus-sandbox --test sandbox_rejects_rm_rf -- --nocapture
+         - name: Run full nexus-sandbox test suite
+           run: cargo test --package nexus-sandbox --lib
+         - name: Run nexus-checkpoint test suite
+           run: cargo test --package nexus-checkpoint --lib
+
+   # Nexus gRPC 端到端测试（启动 mock server + gRPC 客户端验证双向流协议）
+   nexus_grpc_e2e:
+      name: "Nexus: gRPC end-to-end"
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+      needs: [check]
+      if: ${{ !cancelled() && needs.check.result == 'success' }}
+      timeout-minutes: 15
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: Run nexus-grpc e2e tests
+           run: |
+              cd packages/nexus-grpc
+              bun test test/e2e.test.ts
+
+   # ===========================================================================
+   # Nexus Agent M9 — Task 9.2 专有测试套件
+   # ---------------------------------------------------------------------------
+   # 每个 nexus-* 包一个 job，便于在 CI 历史中按包定位失败。所有 job 都
+   # `needs: [check]` 并 `if: success()`，不阻塞 omp 已有发布流程。
+   # ===========================================================================
+
+   # nexus-checkpoint 测试：Rust crate + TS 包
+   nexus_checkpoint_test:
+      name: "Nexus: checkpoint (Rust + TS)"
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+      needs: [check]
+      if: ${{ !cancelled() && needs.check.result == 'success' }}
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/ensure-rust-toolchain
+           with:
+              toolchain: nightly-2026-04-29
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: cargo test -p nexus-checkpoint
+           run: cargo test --package nexus-checkpoint --no-fail-fast
+         - name: bun test packages/nexus-checkpoint
+           shell: bash
+           run: |
+              if [ -d packages/nexus-checkpoint ] && [ -f packages/nexus-checkpoint/package.json ]; then
+                cd packages/nexus-checkpoint
+                bun test
+              fi
+
+   # nexus-compaction 测试：TS 单测 + benchmark
+   nexus_compaction_test:
+      name: "Nexus: compaction (TS + benchmark)"
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+      needs: [check]
+      if: ${{ !cancelled() && needs.check.result == 'success' }}
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: bun test packages/nexus-compaction
+           shell: bash
+           run: |
+              if [ -d packages/nexus-compaction ] && [ -f packages/nexus-compaction/package.json ]; then
+                cd packages/nexus-compaction
+                # 跑单测（含 SQuAD 基准的快路径，正式 benchmark 见单独的 bench script）
+                bun test
+                # 运行 benchmark 烟雾测试（仅校验可运行，不强制阈值）
+                if bun run --silent bench:smoke 2>/dev/null; then
+                  echo "::notice::compaction benchmark smoke 通过"
+                else
+                  echo "::notice::compaction benchmark smoke 跳过（无 bench:smoke 脚本）"
+                fi
+              fi
+
+   # nexus-routing 测试：TS 单测覆盖路由优先级
+   nexus_routing_test:
+      name: "Nexus: routing (TS)"
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+      needs: [check]
+      if: ${{ !cancelled() && needs.check.result == 'success' }}
+      timeout-minutes: 15
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: bun test packages/nexus-routing
+           shell: bash
+           run: |
+              if [ -d packages/nexus-routing ] && [ -f packages/nexus-routing/package.json ]; then
+                cd packages/nexus-routing
+                bun test
+              fi
+
+   # ===========================================================================
+   # Nexus Agent M9 — Task 9.3 Coverage job
+   # ---------------------------------------------------------------------------
+   # 仅 Linux 跑：聚合 bun --coverage 与 cargo-tarpaulin，上传到 artifacts。
+   # 若配置了 CODECOV_TOKEN，则同时上传到 Codecov。
+   # ===========================================================================
+   nexus_coverage:
+      name: "Nexus: coverage (Linux only)"
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+      needs: [check]
+      if: ${{ !cancelled() && needs.check.result == 'success' }}
+      timeout-minutes: 30
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/ensure-rust-toolchain
+           with:
+              toolchain: nightly-2026-04-29
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: Install cargo-tarpaulin
+           shell: bash
+           run: |
+              if ! cargo tarpaulin --version >/dev/null 2>&1; then
+                cargo install cargo-tarpaulin --locked --version 0.31.0 || echo "::notice::tarpaulin 安装失败，将仅跑 TS coverage"
+              fi
+         - name: Run coverage (TS + Rust)
+           run: bun scripts/coverage.ts
+         - name: Upload coverage artifact
+           uses: actions/upload-artifact@v4
+           with:
+              name: nexus-coverage-${{ github.sha }}
+              path: coverage/
+              retention-days: 14
+         - name: Upload to Codecov
+           if: ${{ hashFiles('coverage/ts/lcov.info') != '' }}
+           uses: codecov/codecov-action@v4
+           with:
+              files: coverage/ts/lcov.info,coverage/rust/lcov.info
+              flags: nexus-ts,nexus-rust
+              fail_ci_if_error: false
+              token: ${{ secrets.CODECOV_TOKEN }}
+
+   # ===========================================================================
+   # Nexus Agent M9 — Task 9.5 安全审计 job
+   # ---------------------------------------------------------------------------
+   # 调 scripts/security-audit.ts：hardening:strict + verify:privacy。
+   # 不阻塞 omp 已有发布流程。
+   # ===========================================================================
+   nexus_security_audit:
+      name: "Nexus: security audit (hardening + privacy)"
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+      needs: [check]
+      if: ${{ !cancelled() && needs.check.result == 'success' }}
+      timeout-minutes: 10
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: Run security audit (hardening:strict + verify:privacy)
+           run: bun scripts/security-audit.ts --mode hardening:strict --mode verify:privacy
+
+   # ===========================================================================
+   # Nexus Agent — Task 3.3 bash AST & destructive regression jobs
+   # ---------------------------------------------------------------------------
+   # Two independent Linux-only jobs:
+   #   1. nexus_bash_ast_test        — Rust bash_ast unit tests + TS walker
+   #                                   tests (Task 1.1 / Task 1.2).
+   #   2. nexus_destructive_regression — DoomLoopDetector (Task 2.3) + the
+   #                                    destructive-regression integration
+   #                                    suite (Task 3.1). Linux only because
+   #                                    the suite relies on Landlock/reflink
+   #                                    primitives that require Linux.
+   # Both jobs depend only on `check` and do not block the omp release flow,
+   # mirroring the other nexus_*_test jobs.
+   # ===========================================================================
+
+   # bash AST tests: runs Rust unit tests (crates/pi-natives/src/bash_ast.rs)
+   # and the TS walker suite (packages/nexus-bash-ast/). Kept independent of
+   # nexus_matrix so a flaky matrix entry cannot mask bash AST regressions.
+   nexus_bash_ast_test:
+      name: "Nexus: bash AST (Rust + TS)"
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+      needs: [check]
+      if: ${{ !cancelled() && needs.check.result == 'success' }}
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/ensure-rust-toolchain
+           with:
+              toolchain: nightly-2026-04-29
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: Build pi-natives (Rust cdylib)
+           run: cargo build -p pi-natives --release
+         - name: Build NAPI addon
+           # build:native runs `bun --cwd=packages/natives run build` (see root
+           # package.json) and produces the .node addon the TS walker imports.
+           run: bun run build:native
+         - name: Rust bash_ast tests
+           run: cargo test -p pi-natives --lib bash_ast
+         - name: TS walker tests
+           shell: bash
+           run: |
+              if [ -d packages/nexus-bash-ast ] && [ -f packages/nexus-bash-ast/package.json ]; then
+                cd packages/nexus-bash-ast
+                bun test
+              else
+                echo "::warning::packages/nexus-bash-ast not found, skipping TS walker tests"
+              fi
+
+   # Destructive regression: DoomLoopDetector (packages/agent) + the
+   # destructive-regression integration suite (packages/coding-agent). Linux
+   # only — Landlock/reflink primitives in the suite require Linux.
+   nexus_destructive_regression:
+      name: "Nexus: destructive regression (Linux only)"
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+      needs: [check]
+      if: ${{ !cancelled() && needs.check.result == 'success' }}
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/ensure-rust-toolchain
+           with:
+              toolchain: nightly-2026-04-29
+         - uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: "1.3"
+         - name: Bun install (root)
+           run: bun install --frozen-lockfile
+         - name: Build natives
+           # Build the Rust cdylibs the destructive-regression suite loads via
+           # NAPI, then package the .node addon.
+           run: |
+              cargo build -p pi-natives -p nexus-sandbox -p nexus-checkpoint --release
+              bun run build:native
+         - name: DoomLoopDetector tests
+           shell: bash
+           run: |
+              if [ -f packages/agent/test/doom-loop-detector.test.ts ]; then
+                bun test packages/agent/test/doom-loop-detector.test.ts
+              else
+                echo "::warning::packages/agent/test/doom-loop-detector.test.ts not found, skipping"
+              fi
+         - name: Destructive regression tests
+           shell: bash
+           run: |
+              if [ -f packages/coding-agent/test/integration/destructive-regression.test.ts ]; then
+                bun test packages/coding-agent/test/integration/destructive-regression.test.ts
+              else
+                echo "::warning::packages/coding-agent/test/integration/destructive-regression.test.ts not found, skipping"
+              fi

@@ -1,0 +1,59 @@
+{
+  "name": "@nexus-agent/routing",
+  "version": "17.0.2",
+  "description": "Per-agent model routing for Nexus Agent — ported from OpenClaude's agentModels/agentRouting design",
+  "private": true,
+  "type": "module",
+  "homepage": "https://nexus.agent",
+  "author": "Nexus Agent",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nexus-agent/nexus-agent.git",
+    "directory": "packages/nexus-routing"
+  },
+  "keywords": [
+    "nexus",
+    "routing",
+    "agent",
+    "model",
+    "per-agent",
+    "openclaude"
+  ],
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "check": "biome check . && bun run check:types",
+    "check:types": "tsgo -p tsconfig.json --noEmit",
+    "lint": "biome lint .",
+    "test": "bun test --parallel",
+    "fix": "biome check --write --unsafe .",
+    "fmt": "biome format --write ."
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-ai": "catalog:",
+    "@oh-my-pi/pi-catalog": "catalog:",
+    "@oh-my-pi/pi-utils": "catalog:",
+    "arktype": "catalog:"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./*": {
+      "types": "./src/*.ts",
+      "import": "./src/*.ts"
+    }
+  }
+}
