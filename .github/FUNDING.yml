@@ -1,0 +1,9 @@
+# These are the supported funding platforms for GitHub Sponsors button.
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+#
+# Nexus Agent accepts voluntary sponsorship via WeChat / Alipay QR codes
+# displayed in the README. Since those platforms are not part of GitHub's
+# built-in funding platform list, we use `custom` to point the "Sponsor"
+# button at the README sponsor section.
+
+custom: ["https://github.com/wjb12387767/nexus-agent#sponsor--赞助"]
