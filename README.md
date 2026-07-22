@@ -140,30 +140,54 @@ agent runtime is TypeScript on Bun, not a single Rust executable.
 
 ### Option A: Docker (recommended — no toolchain needed)
 
-Prebuilt multi-arch images (`linux/amd64` + `linux/arm64`) are published to
-GitHub Container Registry on every `nexus-v*` tag push.
+Prebuilt `linux/amd64` images are published to GitHub Container Registry on
+every `nexus-v*` tag push. (arm64 is not yet supported — cross-compiling the
+Rust NAPI modules exceeded the GitHub runner's disk; see
+[Known Limitations](#known-limitations).)
+
+**Quick start (single container):**
 
 ```sh
-# 1. Pull the beta image
 docker pull ghcr.io/wjb12387767/nexus-agent:1.0.0-beta
-
-# 2. Run the interactive TUI against the current directory
 docker run --rm -it -v "$PWD":/work ghcr.io/wjb12387767/nexus-agent:1.0.0-beta cli
+```
 
-# 3. (optional) Start the full stack (agent + Qdrant + Docling + LightRAG)
+**Full-stack mode (agent + Qdrant + Docling + LightRAG, via docker compose):**
+
+```sh
+# 1. Clone the repo
+git clone https://github.com/wjb12387767/nexus-agent.git
+cd nexus-agent
+
+# 2. Copy the environment template and fill in your LLM credentials
+cp .env.example .env
+#   Edit .env:
+#     LLM_API_BASE=http://host.docker.internal:18317/v1   # your LLM endpoint
+#     LLM_API_KEY=sk-your-api-key-here                    # your API key
+#     LLM_MODEL=grok-4.5                                  # your model name
+
+# 3. (Optional) point WORKSPACE_DIR at the project you want the agent to work on
+#    Default is ./workspace (a sandbox inside the repo).
+
+# 4. Start the full stack
 docker compose up -d
+
+# 5. Enter the agent's interactive TUI
 docker compose exec nexus cli
 ```
 
-**Full-stack mode** bundles all 4 MCP services via
-[docker-compose.yml](./docker-compose.yml):
+The compose file ([docker-compose.yml](./docker-compose.yml)) orchestrates:
 
-1. Copy [mcp.json.example](./mcp.json.example) to `~/.nexus/agent/mcp.json`
-2. Fill in your API key (`LLM_API_KEY`, `LLM_API_BASE`, `LLM_MODEL`)
-3. `docker compose up -d`
+| Service | Purpose |
+|---|---|
+| `nexus` | The agent runtime (TUI + tool layer). Mounts `WORKSPACE_DIR` into `/work`, persists `~/.nexus` in a named volume. |
+| `qdrant` | Vector database for long-term knowledge storage. Port 6333 (REST) / 6334 (gRPC). |
+| `docling` | PDF/Word/PPT/Excel/EPUB → Markdown. First run downloads ~1–2 GB of models. |
+| `lightrag` | Knowledge-graph RAG with 5 retrieval modes. Runs the bridge script at [externals/lightrag-mcp-bridge/](./externals/lightrag-mcp-bridge/). |
+| `playwright` | (Commented out — opt-in) Browser automation. Uncomment in compose to enable. |
 
-The compose file mounts `${WORKSPACE_DIR:-./workspace}` into `/work` and
-persists `~/.nexus` (credentials, sessions, mnemopi DB) across rebuilds.
+All 4 MCP services are addressed via service names (e.g. `http://qdrant:6333`)
+inside the `nexus-net` Docker network — no host port configuration needed.
 
 ### Option B: Source build (macOS / Linux)
 
@@ -363,6 +387,11 @@ of the following limitations before using or contributing:
   single Rust binary. The `release.yml` workflow builds `.node` NAPI addons
   per-platform but does not bundle Bun + TS into a single executable. Use
   Docker for a no-toolchain install.
+- **Docker image is amd64-only:** The GHCR image is built for `linux/amd64`
+  only. arm64 cross-compilation exceeded the GitHub runner's 14 GB disk limit
+  (Rust NAPI compilation + node_modules install needs ~20 GB). On Apple Silicon
+  or other arm64 hosts, use Docker's amd64 emulation (`--platform linux/amd64`)
+  or build from source.
 - **CI depends on self-hosted runner:** The CI matrix uses a self-hosted runner
   (`omp-kata`) inherited from the upstream project. Forks without this runner
   will see CI failures on `main` branch pushes. PR-triggered CI uses

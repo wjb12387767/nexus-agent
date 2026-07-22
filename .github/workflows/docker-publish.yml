@@ -2,16 +2,17 @@
 #
 # Triggers:
 #   - push of `nexus-v*` tag  → publishes `:1.0.0-beta` + `:latest` (stable)
-#   - push to `main`           → publishes `:main` (rolling dev tag)
 #   - workflow_dispatch        → manual rebuild
 #
 # Output:
 #   ghcr.io/wjb12387767/nexus-agent:<version>
 #   ghcr.io/wjb12387767/nexus-agent:latest  (tag pushes only)
 #
-# Multi-arch: linux/amd64, linux/arm64
-# (arm64 cross-compiled via QEMU; native arm64 runners would be faster but
-#  cost money — fine for beta.)
+# Architecture: linux/amd64 only.
+# (arm64 cross-compiled via QEMU was tried and ran out of disk on the GitHub
+#  runner — the Rust NAPI compilation + node_modules install needs ~20 GB,
+#  and the runner has 14 GB. Native arm64 runners would fix this but cost
+#  money; revisit when there's real arm64 demand.)
 
 name: Docker Publish
 
@@ -48,8 +49,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for arm64 cross-build)
-        uses: docker/setup-qemu-action@v3
+      # GitHub runners have 14 GB of disk. The Nexus build needs ~20 GB
+      # (Rust NAPI compilation + node_modules with onnxruntime-node ~1 GB +
+      # @ts-morph/common + puppeteer browsers). Free up space by removing
+      # pre-installed toolchains we don't use.
+      - name: Free up disk space on the runner
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true       # ~2 GB of cached tools
+          android: true          # ~9 GB of Android SDK
+          dotnet: true           # ~1.5 GB
+          haskell: true          # ~1 GB
+          large-packages: false  # keep docker, buildx, etc.
+          docker-images: false   # keep base images for caching
+          swap-storage: false    # keep swap
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -68,14 +81,12 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           # Tag strategy:
           #   nexus-v1.0.0-beta  → 1.0.0-beta, latest
-          #   main branch        → main
           #   manual dispatch    → <input> or sha-<short>
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/nexus-v') }}
-            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.version != '' }}
             type=sha,prefix=sha-,enable=${{ github.event_name == 'workflow_dispatch' && inputs.version == '' }}
           labels: |
@@ -84,12 +95,12 @@ jobs:
             org.opencontainers.image.source=https://github.com/wjb12387767/nexus-agent
             org.opencontainers.image.licenses=MIT
 
-      - name: Build and push (multi-arch)
+      - name: Build and push (linux/amd64)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -109,6 +120,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Image: ghcr.io/${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
           echo "Tags:  ${IMAGE_TAGS}" >> $GITHUB_STEP_SUMMARY
+          echo "Arch:  linux/amd64" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Pull with:" >> $GITHUB_STEP_SUMMARY
           echo '```sh' >> $GITHUB_STEP_SUMMARY

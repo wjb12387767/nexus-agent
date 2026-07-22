@@ -97,7 +97,7 @@ services:
   # LightRAG MCP bridge — knowledge-graph RAG with 5 retrieval modes.
   #
   # This is a thin Python MCP bridge that wraps the LightRAG engine.
-  # The bridge script lives in the host's ~/.nexus/externals/lightrag-mcp-bridge/
+  # The bridge script ships in the repo at externals/lightrag-mcp-bridge/
   # and is mounted read-only into the container.
   # ───────────────────────────────────────────────────────────────────────
   lightrag:
@@ -114,10 +114,8 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY must be set in .env}
       LLM_MODEL: ${LLM_MODEL:-grok-4.5}
     volumes:
-      # Bridge script (mounted from host ~/.nexus/externals/lightrag-mcp-bridge/).
-      # If the path doesn't exist on the host, comment this service out and
-      # re-run `scripts/start-services.ps1` to scaffold it first.
-      - ${HOME}/.nexus/externals/lightrag-mcp-bridge:/srv/lightrag:ro
+      # Bridge script — ships in the repo, no host setup required.
+      - ./externals/lightrag-mcp-bridge:/srv/lightrag:ro
       - lightrag-data:/data/lightrag
     ports:
       - "8000:8000"
