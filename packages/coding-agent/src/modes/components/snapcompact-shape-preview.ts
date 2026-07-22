@@ -27,6 +27,7 @@ import {
 	type ShapeTarget,
 	type ShapeVariantName,
 } from "@oh-my-pi/snapcompact";
+import { t } from "../i18n";
 import { theme } from "../theme/theme";
 import sampleDoc from "./snapcompact-shape-preview-doc.md" with { type: "text" };
 
@@ -86,21 +87,26 @@ export class SnapcompactShapePreview implements Component {
 			shape.frameTokenEstimate >= 1000
 				? `${(shape.frameTokenEstimate / 1000).toFixed(1)}k`
 				: String(shape.frameTokenEstimate);
-		const stats = `full frame ${geo.cols}×${geo.rows} cells ≈ ${chars} chars ≈ ${tokens} tokens`;
+		const stats = t("settings.snapcompact.stats", {
+			cols: String(geo.cols),
+			rows: String(geo.rows),
+			chars,
+			tokens,
+		});
 		const lines: string[] = [theme.fg("muted", `  Sample (zoomed) · ${label} · ${stats}`), ""];
 
 		if (!this.#budget || !TERMINAL.imageProtocol) {
-			lines.push(theme.fg("dim", "  (graphic sample needs a Kitty-graphics terminal)"));
+			lines.push(theme.fg("dim", t("settings.snapcompact.needKitty")));
 			return lines;
 		}
 
 		const entry = this.#ensureEntry(name, shape);
 		if (entry.state === "rendering") {
-			lines.push(theme.fg("dim", "  rendering sample…"));
+			lines.push(theme.fg("dim", t("settings.snapcompact.rendering")));
 			return lines;
 		}
 		if (entry.state === "failed") {
-			lines.push(theme.fg("dim", "  (sample render failed)"));
+			lines.push(theme.fg("dim", t("settings.snapcompact.renderFailed")));
 			return lines;
 		}
 
@@ -117,7 +123,7 @@ export class SnapcompactShapePreview implements Component {
 		// Only the unicode-placeholder path returns text-cell `lines`; cursor-moving
 		// placements would corrupt the bordered settings frame, so skip them.
 		if (!result?.lines) {
-			lines.push(theme.fg("dim", "  (graphic sample needs Kitty unicode-placeholder graphics)"));
+			lines.push(theme.fg("dim", t("settings.snapcompact.needUnicodePlaceholder")));
 			return lines;
 		}
 		if (result.transmit) {
@@ -149,7 +155,7 @@ export class SnapcompactShapePreview implements Component {
 				text += ` ${PREVIEW_TEXT}`;
 			}
 			const frame = (await renderMany(text, { shape, frameSize: SRC_FRAME_PX, maxFrames: 1 }))[0];
-			if (!frame) throw new Error("empty sample frame");
+			if (!frame) throw new Error(t("settings.snapcompact.emptyFrame"));
 			const edgePx = SRC_FRAME_PX * ZOOM_SCALE;
 			const zoomed = await new Bun.Image(Buffer.from(frame.data, "base64"))
 				.resize(edgePx, edgePx, { filter: "nearest" })

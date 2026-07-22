@@ -1,7 +1,17 @@
 {
   "name": "nexus-agent",
   "version": "1.0.0-beta",
+  "description": "The strongest open-source AI coding agent — a fusion of three flagships (omp + Grok Build + OpenClaude).",
+  "license": "MIT",
+  "author": "Nexus Agent Contributors",
   "homepage": "https://github.com/wjb12387767/nexus-agent",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wjb12387767/nexus-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wjb12387767/nexus-agent/issues"
+  },
   "private": true,
   "type": "module",
   "packageManager": "bun@1.3.14",

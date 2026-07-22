@@ -7,6 +7,7 @@ dist/
 packages/*/dist/
 packages/*/dist-chrome/
 packages/*/dist-firefox/
+packages/*/native/.build/
 target/
 *.tsbuildinfo
 *.node
@@ -20,14 +21,31 @@ target/
 .zed/
 .idea/
 .trae/
+.fallow/
 *.swp
 *.swo
 *.kate-swp
 *~
 
+# Local toolchain overrides (mirrors, registry proxies, etc.)
+.cargo/
+
+# Local launcher artifacts / runtime logs
+opencode-serve.err
+*.err.log
+
 # OS
 *.tmp
 .DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# IDE (additional)
+.cursor/
+
+# Legacy omp config (local user data)
+.omp/
 
 # Logs & profiling
 *.log
@@ -55,6 +73,7 @@ syntax.jsonl
 out.jsonl
 out.html
 pi-*.html
+outputs/
 
 # Generated files
 packages/coding-agent/src/export/html/tool-views.generated.js

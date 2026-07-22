@@ -33,6 +33,7 @@ import {
 import type { InstalledPlugin, PluginSettingSchema } from "../../extensibility/plugins/types";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { shortenPath } from "../../tools/render-utils";
+import { t } from "../i18n";
 import { DynamicBorder } from "./dynamic-border";
 
 /**
@@ -112,16 +113,14 @@ export class PluginListComponent extends Container {
 
 		// Title
 		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold(theme.fg("accent", "  Plugins")), 0, 0));
+		this.addChild(new Text(theme.bold(theme.fg("accent", t("plugins.title"))), 0, 0));
 		this.addChild(new Spacer(1));
 
 		if (entries.length === 0) {
-			this.addChild(new Text(theme.fg("muted", "  No plugins installed"), 0, 0));
+			this.addChild(new Text(theme.fg("muted", t("plugins.empty")), 0, 0));
 			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("dim", "  Install npm plugins:        omp plugin install <package>"), 0, 0));
-			this.addChild(
-				new Text(theme.fg("dim", "  Install marketplace plugins: omp plugin install <name>@<marketplace>"), 0, 0),
-			);
+			this.addChild(new Text(theme.fg("dim", t("plugins.installNpm")), 0, 0));
+			this.addChild(new Text(theme.fg("dim", t("plugins.installMarketplace")), 0, 0));
 			this.addChild(new Spacer(1));
 			this.addChild(new DynamicBorder());
 
@@ -152,12 +151,12 @@ export class PluginListComponent extends Container {
 
 		this.addChild(this.#selectList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to configure · Esc to go back"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", t("plugins.hint.configure")), 0, 0));
 		this.addChild(new DynamicBorder());
 	}
 
 	#renderItem(entry: PluginListEntry): SelectItem {
-		const kindBadge = theme.fg("dim", entry.kind === "npm" ? "[npm]" : "[marketplace]");
+		const kindBadge = theme.fg("dim", entry.kind === "npm" ? t("plugins.badge.npm") : t("plugins.badge.marketplace"));
 
 		if (entry.kind === "npm") {
 			const p = entry.plugin;
@@ -169,7 +168,7 @@ export class PluginListComponent extends Container {
 
 			let details = `${kindBadge} ${theme.sep.dot} v${p.version}`;
 			if (featureCount > 0) {
-				details += ` ${theme.sep.dot} ${enabledCount}/${featureCount} features`;
+				details += ` ${theme.sep.dot} ${t("plugins.features", { enabled: String(enabledCount), count: String(featureCount) })}`;
 			}
 
 			return {
@@ -188,7 +187,7 @@ export class PluginListComponent extends Container {
 
 		let details = `${kindBadge} ${scopeTag} ${theme.sep.dot} v${version}`;
 		if (summary.shadowedBy) {
-			details += ` ${theme.sep.dot} shadowed by ${summary.shadowedBy}`;
+			details += ` ${theme.sep.dot} ${t("plugins.shadowedBy", { name: summary.shadowedBy })}`;
 		}
 
 		return {
@@ -252,10 +251,10 @@ export class PluginDetailComponent extends Container {
 		// Enable/disable toggle
 		items.push({
 			id: "__enabled__",
-			label: "Enabled",
-			description: "Enable or disable this plugin",
-			currentValue: plugin.enabled ? "true" : "false",
-			values: ["true", "false"],
+			label: t("plugins.enabled.label"),
+			description: t("plugins.enabled.description"),
+			currentValue: plugin.enabled ? t("settings.boolean.true") : t("settings.boolean.false"),
+			values: [t("settings.boolean.true"), t("settings.boolean.false")],
 		});
 
 		// Feature toggles
@@ -273,9 +272,9 @@ export class PluginDetailComponent extends Container {
 				items.push({
 					id: `feature:${featName}`,
 					label: `  ${featName}`,
-					description: feat.description || `Enable ${featName} feature`,
-					currentValue: isEnabled ? "true" : "false",
-					values: ["true", "false"],
+					description: feat.description || t("plugins.feature.defaultDescription", { name: featName }),
+					currentValue: isEnabled ? t("settings.boolean.true") : t("settings.boolean.false"),
+					values: [t("settings.boolean.true"), t("settings.boolean.false")],
 				});
 			}
 		}
@@ -286,26 +285,27 @@ export class PluginDetailComponent extends Container {
 
 			for (const [key, schema] of Object.entries(manifest.settings)) {
 				const currentValue = settings[key] ?? schema.default;
-				const displayValue = schema.secret && currentValue ? "••••••••" : String(currentValue ?? "(not set)");
+				const displayValue =
+					schema.secret && currentValue ? "••••••••" : String(currentValue ?? t("plugins.notSet"));
 
 				if (schema.type === "boolean") {
 					items.push({
 						id: `config:${key}`,
 						label: `  ${key}`,
-						description: schema.description || `Configure ${key}`,
-						currentValue: currentValue ? "true" : "false",
-						values: ["true", "false"],
+						description: schema.description || t("plugins.config.defaultDescription", { key }),
+						currentValue: currentValue ? t("settings.boolean.true") : t("settings.boolean.false"),
+						values: [t("settings.boolean.true"), t("settings.boolean.false")],
 					});
 				} else if (schema.type === "enum") {
 					items.push({
 						id: `config:${key}`,
 						label: `  ${key}`,
-						description: schema.description || `Configure ${key}`,
+						description: schema.description || t("plugins.config.defaultDescription", { key }),
 						currentValue: String(currentValue ?? schema.default ?? ""),
 						submenu: (cv, done) =>
 							new ConfigEnumSubmenu(
 								key,
-								schema.description || `Select value for ${key}`,
+								schema.description || t("plugins.config.selectValue", { key }),
 								schema.values,
 								cv,
 								value => {
@@ -320,13 +320,13 @@ export class PluginDetailComponent extends Container {
 					items.push({
 						id: `config:${key}`,
 						label: `  ${key}`,
-						description: schema.description || `Configure ${key}`,
+						description: schema.description || t("plugins.config.defaultDescription", { key }),
 						currentValue: displayValue,
 						submenu: (cv, done) =>
 							new ConfigInputSubmenu(
 								key,
 								schema,
-								cv === "(not set)" ? "" : cv,
+								cv === t("plugins.notSet") ? "" : cv,
 								value => {
 									const parsed = schema.type === "number" ? Number(value) : value;
 									this.callbacks.onConfigChange(key, parsed);
@@ -344,15 +344,16 @@ export class PluginDetailComponent extends Container {
 			Math.min(items.length, 10),
 			getSettingsListTheme(),
 			(id, newValue) => {
+				const trueLabel = t("settings.boolean.true");
 				if (id === "__enabled__") {
-					this.callbacks.onEnabledChange(newValue === "true");
-					this.plugin = { ...this.plugin, enabled: newValue === "true" };
+					this.callbacks.onEnabledChange(newValue === trueLabel);
+					this.plugin = { ...this.plugin, enabled: newValue === trueLabel };
 				} else if (id.startsWith("feature:")) {
 					const featName = id.slice(8);
-					this.callbacks.onFeatureChange(featName, newValue === "true");
+					this.callbacks.onFeatureChange(featName, newValue === trueLabel);
 					// Update local state
 					const current = new Set(this.plugin.enabledFeatures ?? []);
-					if (newValue === "true") {
+					if (newValue === trueLabel) {
 						current.add(featName);
 					} else {
 						current.delete(featName);
@@ -362,7 +363,7 @@ export class PluginDetailComponent extends Container {
 					const key = id.slice(7);
 					const schema = this.plugin.manifest.settings?.[key];
 					if (schema?.type === "boolean") {
-						this.callbacks.onConfigChange(key, newValue === "true");
+						this.callbacks.onConfigChange(key, newValue === trueLabel);
 					}
 				}
 			},
@@ -371,7 +372,7 @@ export class PluginDetailComponent extends Container {
 
 		this.addChild(this.#settingsList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to edit · Esc to go back"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", t("plugins.hint.edit")), 0, 0));
 		this.addChild(new DynamicBorder());
 	}
 
@@ -412,17 +413,18 @@ export class MarketplacePluginDetailComponent extends Container {
 		this.addChild(new Text(theme.bold(theme.fg("accent", `  ${plugin.id}`)), 0, 0));
 
 		const subtitleParts = [`[${plugin.scope}]`];
-		if (plugin.shadowedBy) subtitleParts.push(`${theme.status.shadowed} shadowed by ${plugin.shadowedBy}`);
+		if (plugin.shadowedBy)
+			subtitleParts.push(`${theme.status.shadowed} ${t("plugins.shadowedBy", { name: plugin.shadowedBy })}`);
 		this.addChild(new Text(theme.fg("muted", `  ${subtitleParts.join(" ")}`), 0, 0));
 		this.addChild(new Spacer(1));
 
 		const items: SettingItem[] = [
 			{
 				id: "__enabled__",
-				label: "Enabled",
-				description: "Enable or disable this marketplace plugin",
-				currentValue: enabled ? "true" : "false",
-				values: ["true", "false"],
+				label: t("plugins.enabled.label"),
+				description: t("plugins.enabled.marketplaceDescription"),
+				currentValue: enabled ? t("settings.boolean.true") : t("settings.boolean.false"),
+				values: [t("settings.boolean.true"), t("settings.boolean.false")],
 			},
 		];
 
@@ -432,7 +434,7 @@ export class MarketplacePluginDetailComponent extends Container {
 			getSettingsListTheme(),
 			(id, newValue) => {
 				if (id === "__enabled__") {
-					const next = newValue === "true";
+					const next = newValue === t("settings.boolean.true");
 					this.callbacks.onEnabledChange(next);
 					this.plugin = {
 						...this.plugin,
@@ -448,23 +450,46 @@ export class MarketplacePluginDetailComponent extends Container {
 
 		// Read-only metadata. SettingsList rejects items without `values`/`submenu`,
 		// so we render the metadata as plain text rows beneath the toggle.
-		this.addChild(new Text(theme.fg("dim", `  version       ${entry?.version ?? "(unknown)"}`), 0, 0));
-		this.addChild(new Text(theme.fg("dim", `  scope         ${plugin.scope}`), 0, 0));
 		this.addChild(
 			new Text(
-				theme.fg("dim", `  install path  ${entry?.installPath ? shortenPath(entry.installPath) : "(unknown)"}`),
+				theme.fg("dim", t("plugins.metadata.version", { value: entry?.version ?? t("plugins.unknown") })),
 				0,
 				0,
 			),
 		);
-		this.addChild(new Text(theme.fg("dim", `  installed at  ${entry?.installedAt ?? "(unknown)"}`), 0, 0));
-		this.addChild(new Text(theme.fg("dim", `  last updated  ${entry?.lastUpdated ?? "(unknown)"}`), 0, 0));
+		this.addChild(new Text(theme.fg("dim", t("plugins.metadata.scope", { value: plugin.scope })), 0, 0));
+		this.addChild(
+			new Text(
+				theme.fg(
+					"dim",
+					t("plugins.metadata.installPath", {
+						value: entry?.installPath ? shortenPath(entry.installPath) : t("plugins.unknown"),
+					}),
+				),
+				0,
+				0,
+			),
+		);
+		this.addChild(
+			new Text(
+				theme.fg("dim", t("plugins.metadata.installedAt", { value: entry?.installedAt ?? t("plugins.unknown") })),
+				0,
+				0,
+			),
+		);
+		this.addChild(
+			new Text(
+				theme.fg("dim", t("plugins.metadata.lastUpdated", { value: entry?.lastUpdated ?? t("plugins.unknown") })),
+				0,
+				0,
+			),
+		);
 		if (entry?.gitCommitSha) {
-			this.addChild(new Text(theme.fg("dim", `  git sha       ${entry.gitCommitSha}`), 0, 0));
+			this.addChild(new Text(theme.fg("dim", t("plugins.metadata.gitSha", { value: entry.gitCommitSha })), 0, 0));
 		}
 
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to toggle · Esc to go back"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", t("plugins.hint.toggle")), 0, 0));
 		this.addChild(new DynamicBorder());
 	}
 
@@ -513,7 +538,7 @@ class ConfigEnumSubmenu extends Container {
 
 		this.addChild(this.#selectList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to select · Esc to cancel"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", t("plugins.hint.select")), 0, 0));
 	}
 
 	handleInput(data: string): void {
@@ -543,11 +568,14 @@ class ConfigInputSubmenu extends Container {
 		}
 
 		// Type hint
-		let hint = `Type: ${schema.type}`;
+		let hint = t("plugins.config.typeHint", { type: schema.type });
 		if (schema.type === "number") {
 			const numSchema = schema as { min?: number; max?: number };
 			if (numSchema.min !== undefined || numSchema.max !== undefined) {
-				hint += ` (${numSchema.min ?? ""}..${numSchema.max ?? ""})`;
+				hint += t("plugins.config.rangeHint", {
+					min: String(numSchema.min ?? ""),
+					max: String(numSchema.max ?? ""),
+				});
 			}
 		}
 		this.addChild(new Spacer(1));
@@ -571,7 +599,7 @@ class ConfigInputSubmenu extends Container {
 
 		this.addChild(this.#input);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to save · Esc to cancel"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", t("plugins.hint.save")), 0, 0));
 	}
 
 	handleInput(data: string): void {

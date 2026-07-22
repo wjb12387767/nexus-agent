@@ -43,6 +43,8 @@ import type {
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
+import { getCurrentLanguage, type Language, t } from "../i18n";
+import { trGroup, trOption, trTab } from "../i18n/settings";
 import { getTabBarTheme } from "../shared";
 import { bottomBorder, divider, row, topBorder } from "./overlay-box";
 import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings";
@@ -93,7 +95,7 @@ class TextInputSubmenu extends Container {
 		this.addChild(this.#input);
 		this.addChild(new Spacer(1));
 		this.addChild(this.#error);
-		this.addChild(new Text(theme.fg("dim", "  Enter to save · Esc to cancel · Clear field to unset"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `  ${t("settings.hint.input.save")}`), 0, 0));
 	}
 
 	handleInput(data: string): void {
@@ -132,7 +134,7 @@ class SelectSubmenu extends Container {
 		// Preview (if provided)
 		if (getPreview) {
 			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("muted", "Preview:"), 0, 0));
+			this.addChild(new Text(theme.fg("muted", t("settings.submenu.preview")), 0, 0));
 			this.#previewText = new Text(getPreview(), 0, 0);
 			this.addChild(this.#previewText);
 		}
@@ -177,7 +179,7 @@ class SelectSubmenu extends Container {
 
 		// Hint
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to select · Esc to go back"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `  ${t("settings.hint.select")}`), 0, 0));
 
 		// Footer (e.g. the snapcompact shape preview) below the interactive rows,
 		// so the list never shifts while browsing.
@@ -239,18 +241,9 @@ class ProviderLimitsSubmenu extends Container {
 
 	#showProviderList(): void {
 		this.clear();
-		this.addChild(new Text(theme.bold(theme.fg("accent", "Max In-Flight Requests")), 0, 0));
+		this.addChild(new Text(theme.bold(theme.fg("accent", t("settings.providerLimits.title"))), 0, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(
-			new Text(
-				theme.fg(
-					"muted",
-					"Select a provider, enter a positive number to cap concurrent LLM requests, or clear it for unlimited.",
-				),
-				0,
-				0,
-			),
-		);
+		this.addChild(new Text(theme.fg("muted", t("settings.providerLimits.intro")), 0, 0));
 		this.addChild(new Spacer(1));
 
 		const limits = normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"));
@@ -259,13 +252,22 @@ class ProviderLimitsSubmenu extends Container {
 			return {
 				value: provider,
 				label: provider,
-				description: limit === undefined ? "Unlimited" : `Limit: ${limit}`,
+				description:
+					limit === undefined
+						? t("settings.providerLimits.unlimited")
+						: t("settings.providerLimits.limit", { limit: String(limit) }),
 			};
 		});
 		const clearItem: SelectItem[] =
 			Object.keys(limits).length === 0
 				? []
-				: [{ value: "__clear_all", label: "Clear all limits", description: "Make every provider unlimited" }];
+				: [
+						{
+							value: "__clear_all",
+							label: t("settings.providerLimits.clearAll"),
+							description: t("settings.providerLimits.clearAllDesc"),
+						},
+					];
 		const items = [...providerItems, ...clearItem];
 		this.#selectList = new SelectList(items, Math.min(Math.max(items.length, 1), 12), getSelectListTheme());
 		this.#selectList.onSelect = item => {
@@ -281,7 +283,7 @@ class ProviderLimitsSubmenu extends Container {
 		this.#selectList.onCancel = this.onCancel;
 		this.addChild(this.#selectList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to edit provider · Esc to go back"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `  ${t("settings.hint.provider.edit")}`), 0, 0));
 	}
 
 	#showProviderEditor(provider: string): void {
@@ -290,8 +292,8 @@ class ProviderLimitsSubmenu extends Container {
 		this.#selectList = undefined;
 		this.addChild(
 			new TextInputSubmenu(
-				`Max In-Flight Requests: ${provider}`,
-				"Enter a positive number. Decimals round down. Clear the field to make this provider unlimited.",
+				t("settings.providerLimits.editorTitle", { provider }),
+				t("settings.providerLimits.editorDesc"),
 				limits[provider]?.toString() ?? "",
 				value => {
 					const next = { ...limits };
@@ -300,7 +302,8 @@ class ProviderLimitsSubmenu extends Container {
 						delete next[provider];
 					} else {
 						const limit = Number(trimmed);
-						if (!Number.isFinite(limit) || limit <= 0) throw new Error("Limit must be a positive number.");
+						if (!Number.isFinite(limit) || limit <= 0)
+							throw new Error(t("settings.providerLimits.errorPositive"));
 						next[provider] = Math.max(1, Math.floor(limit));
 					}
 					const normalized = validateProviderMaxInFlightRequests(next);
@@ -327,21 +330,29 @@ class ProviderLimitsSubmenu extends Container {
 }
 
 let cachedSidebarWidth: number | undefined;
+let cachedSidebarWidthLang: string | undefined;
 /**
  * Split-sidebar width derived from every group name in the schema (not just
  * the visible tab), so the divider column never moves when switching tabs or
- * when condition-gated groups appear.
+ * when condition-gated groups appear. Cached per language so toggling zh/en
+ * recomputes against the localized group names.
  */
 function settingsSidebarWidth(): number {
-	if (cachedSidebarWidth === undefined) {
-		let nameWidth = 0;
-		for (const tab of SETTING_TABS) {
-			for (const def of getSettingsForTab(tab)) {
-				if (def.group) nameWidth = Math.max(nameWidth, visibleWidth(def.group));
+	const lang = getCurrentLanguage();
+	if (cachedSidebarWidth !== undefined && cachedSidebarWidthLang === lang) {
+		return cachedSidebarWidth;
+	}
+	let nameWidth = 0;
+	for (const tab of SETTING_TABS) {
+		for (const def of getSettingsForTab(tab)) {
+			if (def.group) {
+				const label = trGroup(tab, def.group, def.group);
+				nameWidth = Math.max(nameWidth, visibleWidth(label));
 			}
 		}
-		cachedSidebarWidth = Math.min(22, nameWidth) + 4;
 	}
+	cachedSidebarWidth = Math.min(22, nameWidth) + 4;
+	cachedSidebarWidthLang = lang;
 	return cachedSidebarWidth;
 }
 
@@ -350,9 +361,9 @@ function getSettingsTabs(): Tab[] {
 		...SETTING_TABS.map(id => {
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			return { id, label: `${icon} ${meta.label}`, short: icon };
+			return { id, label: `${icon} ${trTab(id, meta.label)}`, short: icon };
 		}),
-		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
+		{ id: "plugins", label: `${theme.icon.package} ${trTab("plugins", "Plugins")}`, short: theme.icon.package },
 	];
 }
 
@@ -424,6 +435,14 @@ export class SettingsSelectorComponent implements Component {
 	#searchFirstMatch = new Map<string, string>();
 	#textInputActive = false;
 	#hasSectionJump = false;
+	/**
+	 * Language used when the current tab's items were last built. When the
+	 * user switches language (via the language submenu or `/language`), the
+	 * next render detects the mismatch and rebuilds the list so labels,
+	 * descriptions, and option text all follow the new language live —
+	 * without requiring the settings panel to be closed and reopened.
+	 */
+	#itemsLang: Language | null = null;
 	// Frame geometry from the last render, for mouse hit-testing (the
 	// fullscreen overlay paints from screen row 0, so mouse rows map 1:1).
 	#tabRowStart = 0;
@@ -461,6 +480,52 @@ export class SettingsSelectorComponent implements Component {
 		this.#pluginComponent?.invalidate();
 	}
 
+	/**
+	 * Rebuild every cached piece of UI when the active language has changed
+	 * since the last build. The SettingsList items, the search result list,
+	 * the plugin component, and the TabBar labels all cache their translated
+	 * text at build time (because `t()` reads a module-level variable that
+	 * only changes when `initLanguage` runs); without this rebuild, switching
+	 * language via the submenu would persist the setting but leave the panel
+	 * showing the previous language until it was closed and reopened.
+	 *
+	 * Safe to call every render: it's a no-op when the language hasn't moved.
+	 */
+	#refreshForLanguageChange(): void {
+		const lang = getCurrentLanguage();
+		if (this.#itemsLang === lang) return;
+		this.#itemsLang = lang;
+
+		if (this.#searchList) {
+			// While searching, the tab bar shows per-tab match counts with
+			// localized labels and reordered tabs. Re-running the query
+			// rebuilds both the result items and the search-mode tab bar in
+			// the new language. Preserve the current selection by id so the
+			// highlight doesn't jump to the top of the result list.
+			const selectedId = this.#searchList.getSelectedItem()?.id;
+			this.#tabBar.setTabs(getSettingsTabs(), this.#preSearchTabId);
+			this.#setSearchQuery(this.#searchQuery);
+			if (selectedId) this.#searchList.selectItem(selectedId);
+			return;
+		}
+
+		// Standard tab bar: refresh labels (and ordering is unchanged).
+		this.#tabBar.setTabs(getSettingsTabs(), this.#currentTabId);
+
+		if (this.#currentTabId === "plugins") {
+			// Plugin component caches its own labels; recreate it so they
+			// follow the new language.
+			this.#setContent(() => this.#showPluginsTab());
+		} else {
+			// Rebuild the current tab's SettingsList with translated labels,
+			// descriptions, and option strings. Preserve the current selection
+			// by id so the user doesn't lose their place in the list.
+			const selectedId = this.#currentList?.getSelectedItem()?.id;
+			this.#setContent(() => this.#showSettingsTab(this.#currentTabId as SettingTab));
+			if (selectedId) this.#currentList?.selectItem(selectedId);
+		}
+	}
+
 	/** Swap the active content (per-tab list, search list, or plugins). */
 	#setContent(build: () => void): void {
 		this.#currentList = null;
@@ -482,22 +547,25 @@ export class SettingsSelectorComponent implements Component {
 
 	#footerHintText(): string {
 		if (this.#searchList) {
-			return "Enter to change · Tab to jump tabs · Esc to exit search";
+			return t("settings.hint.search");
 		}
 		if (this.#currentTabId === "plugins") {
-			return "Tab to switch tabs · Esc to close";
+			return t("settings.hint.plugins");
 		}
 		if (this.#currentList?.sectionFocused) {
-			return "↑/↓ to jump sections · Tab/Enter to settings · ←/→ to switch tabs · Esc to close";
+			return t("settings.hint.sectionJump");
 		}
-		const nav = this.#hasSectionJump ? "Tab to jump sections · ←/→ to switch tabs" : "Tab to switch tabs";
-		return `Enter/Space to change · ${nav} · Type to search · Esc to close`;
+		const nav = this.#hasSectionJump ? t("settings.hint.defaultWithSectionJump") : t("settings.hint.tabSwitch");
+		return t("settings.hint.default", { nav });
 	}
 
 	/** Single-line search banner: accent icon, editable query with live cursor, right-aligned match count. */
 	#renderSearchBanner(width: number): string {
 		const icon = theme.symbol("icon.search");
-		const countText = this.#searchMatchCount === 1 ? "1 match" : `${this.#searchMatchCount} matches`;
+		const countText =
+			this.#searchMatchCount === 1
+				? t("settings.search.matchSingular")
+				: t("settings.search.matchPlural", { count: String(this.#searchMatchCount) });
 		const rightWidth = visibleWidth(countText) + 1; // trailing margin
 		const prefix = ` ${theme.fg("accent", icon)} `;
 		// The input pads itself to exactly this width and keeps the cursor in view.
@@ -513,13 +581,23 @@ export class SettingsSelectorComponent implements Component {
 	 * then a footer hint pinned above the bottom border.
 	 */
 	render(width: number): readonly string[] {
+		// Live language switching: when the user toggles language (via the
+		// language submenu or `/language`), `initLanguage()` updates the i18n
+		// module's state and the controller calls `requestRender()`. The
+		// SettingsList items, search results, plugin component, and TabBar
+		// labels were all built in the previous language — detect the mismatch
+		// here and rebuild them in the new language before painting.
+		this.#refreshForLanguageChange();
+
 		const height = Math.max(14, process.stdout.rows || 40);
 		const innerWidth = Math.max(1, width - 4);
 
 		const tabLines = this.#tabBar.render(innerWidth);
 		const searching = this.#searchList !== null;
 		const showPreview = !searching && this.#currentTabId === "appearance";
-		const previewLines = showPreview ? ["", theme.fg("muted", "Preview:"), this.#getStatusPreviewString()] : [];
+		const previewLines = showPreview
+			? ["", theme.fg("muted", t("settings.previewLabel")), this.#getStatusPreviewString()]
+			: [];
 
 		// Fixed chrome: top border, tabs, divider, [search row], divider, hint, bottom border.
 		const fixedRows = 1 + tabLines.length + 1 + (searching ? 1 : 0) + 1 + 1 + 1;
@@ -538,7 +616,7 @@ export class SettingsSelectorComponent implements Component {
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, "Settings"));
+		out.push(topBorder(width, t("settings.overlayTitle")));
 		this.#tabRowStart = out.length;
 		this.#tabRowCount = tabLines.length;
 		for (const line of tabLines) {
@@ -644,7 +722,7 @@ export class SettingsSelectorComponent implements Component {
 			{
 				layout: "flat",
 				typeToSearch: false,
-				emptyText: "No matching settings",
+				emptyText: t("settings.search.empty"),
 				hint: "",
 			},
 		);
@@ -698,7 +776,7 @@ export class SettingsSelectorComponent implements Component {
 			const meta = TAB_METADATA[result.tab];
 			items.push({
 				id: `__tab:${result.tab}`,
-				label: `${theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0])} ${meta.label}`,
+				label: `${theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0])} ${trTab(result.tab, meta.label)}`,
 				currentValue: "",
 				heading: true,
 			});
@@ -748,17 +826,22 @@ export class SettingsSelectorComponent implements Component {
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
 			const count = counts.get(id) ?? 0;
 			if (count > 0) {
-				matched.push({ id, label: `${icon} ${meta.label} (${count})`, short: `${icon} ${count}` });
+				matched.push({ id, label: `${icon} ${trTab(id, meta.label)} (${count})`, short: `${icon} ${count}` });
 			}
 		}
 		for (const id of SETTING_TABS) {
 			if (matchedIds.has(id)) continue;
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
+			empty.push({ id, label: `${icon} ${trTab(id, meta.label)}`, short: icon, muted: true });
 		}
 		// Plugins hosts its own UI; it is not part of the schema-backed search.
-		empty.push({ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package, muted: true });
+		empty.push({
+			id: "plugins",
+			label: `${theme.icon.package} ${trTab("plugins", "Plugins")}`,
+			short: theme.icon.package,
+			muted: true,
+		});
 		return [...matched, ...empty];
 	}
 
@@ -773,7 +856,9 @@ export class SettingsSelectorComponent implements Component {
 		const def = getSettingDef(path);
 		if (!def) return;
 		if (def.type === "boolean") {
-			const boolValue = newValue === "true";
+			// values are localized ("开"/"关" or "On"/"Off"); compare against
+			// the localized true label so toggling still works in any language.
+			const boolValue = newValue === t("settings.boolean.true");
 			settings.set(path, boolValue as never);
 			this.callbacks.onChange(path, boolValue);
 		} else if (def.type === "enum") {
@@ -807,30 +892,42 @@ export class SettingsSelectorComponent implements Component {
 					id: def.path,
 					label: def.label,
 					description: def.description,
-					currentValue: currentValue ? "true" : "false",
-					values: ["true", "false"],
+					currentValue: currentValue ? t("settings.boolean.true") : t("settings.boolean.false"),
+					values: [t("settings.boolean.true"), t("settings.boolean.false")],
 					changed,
 				};
 
-			case "enum":
+			case "enum": {
+				// Enum settings (no `ui.options`) render their current value
+				// directly. Run it through `trOption` so users see the localized
+				// label (e.g. "关" instead of "off") when a translation exists.
+				const rawEnumValue = String(currentValue ?? "");
 				return {
 					id: def.path,
 					label: def.label,
 					description: def.description,
-					currentValue: String(currentValue ?? ""),
+					currentValue: trOption(def.path, rawEnumValue, "label", rawEnumValue),
 					values: [...def.values],
 					changed,
 				};
+			}
 
-			case "submenu":
+			case "submenu": {
+				// #getSubmenuCurrentValue returns the raw option value (e.g. "default"),
+				// but def.options already carries the translated labels (via trOption
+				// in settings-defs.ts). Map the raw value to its localized label for
+				// display on the right side of the settings list.
+				const rawSubmenuValue = this.#getSubmenuCurrentValue(def.path, currentValue);
+				const matchedOption = def.options.find(o => o.value === rawSubmenuValue);
 				return {
 					id: def.path,
 					label: def.label,
 					description: def.description,
-					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
+					currentValue: matchedOption ? matchedOption.label : rawSubmenuValue,
 					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
 					changed,
 				};
+			}
 
 			case "text":
 				return {
@@ -878,13 +975,24 @@ export class SettingsSelectorComponent implements Component {
 
 	/**
 	 * Create a submenu for a submenu-type setting.
+	 *
+	 * Note: the incoming `currentValue` is the localized display label (so it
+	 * can be shown directly on the right side of the settings list). For all
+	 * internal logic — pre-selecting the right row, preview handlers, the
+	 * snapcompact shape preview — we use the raw option value resolved from
+	 * `settings.get(def.path)` via {@link #getSubmenuCurrentValue}, because
+	 * option matching in `SelectList` is by `option.value`, not by label.
 	 */
 	#createSubmenu(
 		def: SettingDef & { type: "submenu" },
-		currentValue: string,
+		_currentValue: string,
 		done: (value?: string) => void,
 	): Container {
 		let options = def.options;
+
+		// Resolve the raw option value (e.g. "default", "hindsight") from
+		// settings rather than trusting the localized display label.
+		const rawCurrentValue = this.#getSubmenuCurrentValue(def.path, settings.get(def.path));
 
 		// Special case: inject runtime options for thinking level
 		if (def.path === "defaultThinkingLevel") {
@@ -903,7 +1011,7 @@ export class SettingsSelectorComponent implements Component {
 		let onPreviewCancel: (() => void) | undefined;
 		let footer: Component | undefined;
 
-		const activeThemeBeforePreview = getCurrentThemeName() ?? currentValue;
+		const activeThemeBeforePreview = getCurrentThemeName() ?? rawCurrentValue;
 		if (def.path === "theme.dark" || def.path === "theme.light") {
 			onPreview = value => {
 				return this.callbacks.onThemePreview?.(value);
@@ -942,7 +1050,7 @@ export class SettingsSelectorComponent implements Component {
 				this.callbacks.onStatusLinePreview?.({ separator });
 			};
 		} else if (def.path === "snapcompact.shape") {
-			const shapePreview = new SnapcompactShapePreview(currentValue, {
+			const shapePreview = new SnapcompactShapePreview(rawCurrentValue, {
 				model: this.context.model,
 				imageBudget: this.context.imageBudget,
 				requestRender: this.context.requestRender,
@@ -955,15 +1063,23 @@ export class SettingsSelectorComponent implements Component {
 		const isThemeSetting = def.path === "theme.dark" || def.path === "theme.light";
 		const getPreview = isThemeSetting ? this.callbacks.getStatusLinePreview : undefined;
 
+		// Translate the chosen raw value back to its localized label so the
+		// display string on the right side of the settings list stays in the
+		// active language after a selection.
+		const labelForValue = (rawValue: string): string => {
+			const matched = options.find(o => o.value === rawValue);
+			return matched ? matched.label : rawValue;
+		};
+
 		return new SelectSubmenu(
 			def.label,
 			def.description,
 			options,
-			currentValue,
+			rawCurrentValue,
 			value => {
 				this.#setSettingValue(def.path, value);
 				this.callbacks.onChange(def.path, value);
-				done(value);
+				done(labelForValue(value));
 			},
 			() => {
 				onPreviewCancel?.();
@@ -1018,7 +1134,7 @@ export class SettingsSelectorComponent implements Component {
 	#formatProviderLimitsValue(value: unknown): string {
 		const limits = normalizeProviderMaxInFlightRequests(value);
 		const entries = Object.entries(limits).sort(([a], [b]) => a.localeCompare(b));
-		if (entries.length === 0) return "Unlimited";
+		if (entries.length === 0) return t("settings.providerLimits.unlimited");
 		return entries.map(([provider, limit]) => `${provider}: ${limit}`).join(", ");
 	}
 
@@ -1048,10 +1164,10 @@ export class SettingsSelectorComponent implements Component {
 			try {
 				parsed = JSON.parse(value || "{}");
 			} catch {
-				throw new Error(`Invalid record JSON for ${path}`);
+				throw new Error(t("settings.error.invalidRecordJson", { path }));
 			}
 			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-				throw new Error(`Invalid record JSON for ${path}`);
+				throw new Error(t("settings.error.invalidRecordJson", { path }));
 			}
 			if (path === "providers.maxInFlightRequests") {
 				parsed = validateProviderMaxInFlightRequests(parsed);
@@ -1060,7 +1176,9 @@ export class SettingsSelectorComponent implements Component {
 		} else if (typeof currentValue === "number") {
 			settings.set(path, Number(value) as never);
 		} else if (typeof currentValue === "boolean") {
-			settings.set(path, (value === "true") as never);
+			// Accept both the localized label and the raw "true"/"false" so
+			// programmatic callers (which may pass raw values) still work.
+			settings.set(path, (value === "true" || value === t("settings.boolean.true")) as never);
 		} else {
 			settings.set(path, value as never);
 		}
@@ -1090,7 +1208,8 @@ export class SettingsSelectorComponent implements Component {
 				const path = def.path;
 
 				if (def.type === "boolean") {
-					const boolValue = newValue === "true";
+					// values are localized; compare against the localized true label.
+					const boolValue = newValue === t("settings.boolean.true");
 					settings.set(path, boolValue as never);
 					this.callbacks.onChange(path, boolValue);
 
@@ -1113,6 +1232,9 @@ export class SettingsSelectorComponent implements Component {
 			// split sidebar width so the divider never jumps between tabs.
 			{ typeToSearch: false, hint: "", sidebarWidth: settingsSidebarWidth() },
 		);
+		// Items were built in the active language; record it so the next
+		// render can detect a language change and rebuild them.
+		this.#itemsLang = getCurrentLanguage();
 	}
 
 	/**
@@ -1127,7 +1249,8 @@ export class SettingsSelectorComponent implements Component {
 			const item = this.#defToItem(def);
 			if (!item) continue;
 			if (def.group && def.group !== lastGroup) {
-				items.push({ id: `__heading:${def.group}`, label: def.group, currentValue: "", heading: true });
+				const headingLabel = trGroup(def.tab, def.group, def.group);
+				items.push({ id: `__heading:${def.group}`, label: headingLabel, currentValue: "", heading: true });
 				lastGroup = def.group;
 			}
 			items.push(item);
@@ -1148,7 +1271,7 @@ export class SettingsSelectorComponent implements Component {
 		if (this.callbacks.getStatusLinePreview) {
 			return this.callbacks.getStatusLinePreview();
 		}
-		return theme.fg("dim", "(preview not available)");
+		return theme.fg("dim", t("settings.previewNotAvailable"));
 	}
 
 	/**
@@ -1171,6 +1294,9 @@ export class SettingsSelectorComponent implements Component {
 			onClose: () => this.callbacks.onCancel(),
 			onPluginChanged: () => this.callbacks.onPluginsChanged?.(),
 		});
+		// Plugin component was built in the active language; record it so the
+		// next render can detect a language change and rebuild it.
+		this.#itemsLang = getCurrentLanguage();
 	}
 
 	handleInput(data: string): void {

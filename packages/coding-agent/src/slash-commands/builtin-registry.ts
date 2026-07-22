@@ -27,6 +27,8 @@ import {
 } from "../extensibility/plugins/marketplace";
 import { resolveMemoryBackend } from "../memory-backend";
 import { runPauseScreen } from "../modes/components/pause-screen";
+import { initLanguage, languageDisplayName, t } from "../modes/i18n";
+import { trSlashCommand } from "../modes/i18n/settings";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
@@ -1158,6 +1160,15 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		description: "Show all keyboard shortcuts",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.handleHotkeysCommand();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "help",
+		aliases: ["?"],
+		description: "Show available slash commands",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.handleHelpCommand();
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -2330,6 +2341,37 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		description: "Quit the application",
 		handleTui: shutdownHandlerTui,
 	},
+	{
+		name: "language",
+		description: "Show or switch UI language (auto | en | zh)",
+		allowArgs: true,
+		subcommands: [
+			{ name: "auto", description: "Detect language from system locale" },
+			{ name: "en", description: "Switch to English" },
+			{ name: "zh", description: "切换到简体中文" },
+		],
+		handleTui: (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (!arg) {
+				const current = runtime.ctx.settings.get("language");
+				runtime.ctx.showStatus(`Language: ${current} (use /language auto|en|zh to switch)`);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (arg !== "auto" && arg !== "en" && arg !== "zh") {
+				runtime.ctx.showStatus("Usage: /language [auto|en|zh]");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.settings.set("language", arg);
+			// Resolve and apply at runtime so the welcome screen re-renders
+			// in the new language on the next frame, without requiring a
+			// session restart.
+			const resolved = initLanguage(arg);
+			runtime.ctx.showStatus(t("language.switched", { lang: languageDisplayName(resolved) }));
+			runtime.ctx.editor.setText("");
+		},
+	},
 ];
 
 const BUILTIN_SLASH_COMMAND_LOOKUP = new Map<string, SlashCommandSpec>();
@@ -2523,10 +2565,22 @@ function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
 	runtime?: TuiSlashCommandRuntime,
 ): TuiBuiltinSlashCommand {
-	const materialized: TuiBuiltinSlashCommand = { ...cmd };
+	// Wrap `description` so the TUI autocomplete list reflects the active
+	// language. The base `BuiltinSlashCommand` keeps the English text as
+	// canonical for ACP/help; only the TUI materialization applies the
+	// translation overlay. Subcommands get the same treatment for their
+	// dropdown descriptions.
+	const materialized: TuiBuiltinSlashCommand = {
+		...cmd,
+		description: trSlashCommand(cmd.name, cmd.description),
+		subcommands: cmd.subcommands?.map(sub => ({
+			...sub,
+			description: trSlashCommand(`${cmd.name}.${sub.name}`, sub.description),
+		})),
+	};
 	if (cmd.subcommands) {
-		materialized.getArgumentCompletions = buildArgumentCompletions(cmd.subcommands);
-		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
+		materialized.getArgumentCompletions = buildArgumentCompletions(materialized.subcommands ?? cmd.subcommands);
+		materialized.getInlineHint = buildSubcommandInlineHint(materialized.subcommands ?? cmd.subcommands);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);

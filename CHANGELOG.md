@@ -8,6 +8,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — MCP integrations
+
+Four open-source MCP servers deeply integrated for general-purpose agent
+capabilities:
+
+- **Playwright MCP** (microsoft/playwright-mcp): 20+ browser automation tools
+  via accessibility snapshots. `config.ts` filter bypass allows coexistence
+  with the native Puppeteer/CDP browser tool.
+- **Docling MCP** (docling-project/docling-mcp): PDF/Word/PPT/Excel/EPUB/image
+  parsing to structured Markdown. `markit.ts` transparent takeover routes
+  `read file.pdf` through Docling Serve, with mupdf-wasm fallback.
+- **Qdrant MCP** (qdrant/mcp-server-qdrant): production vector database for
+  long-term knowledge storage. Docker container with persistent volume.
+- **LightRAG MCP** (HKUDS/LightRAG): knowledge graph RAG with 5 retrieval
+  modes. Custom MCP bridge server with lazy init and embedding auto-detection.
+
+### Added — Distribution
+
+- `.env.example` template for environment variable configuration
+- `mcp.json.example` template with placeholder API keys and paths for MCP server config
+- `scripts/start-services.ps1` launcher for Qdrant + Docling Serve
+- `.gitignore` hardened: added `.omp/`, `Thumbs.db`, `desktop.ini`, `.cursor/`, `outputs/`
+- `package.json` metadata completed: description, license, repository, author, bugs
+- Install scripts (`scripts/install.sh`, `scripts/install.ps1`) rebranded from
+  omp to Nexus: repo URL → `wjb12387767/nexus-agent`, binary name → `nexus`,
+  removed npm-registry install path (would install upstream omp), settings
+  dir → `~/.nexus/agent`
+- All GitHub URLs unified to `wjb12387767/nexus-agent` across 11 package.json
+  files, CHANGELOG, and docs (previously split between the placeholder org URL
+  and the upstream `can1357/oh-my-pi` repo)
+- Tag aligned with release workflow: `v1.0.0-beta` → `nexus-v1.0.0-beta`
+  (matches `release.yml` trigger pattern `nexus-v*`)
+- Git remote configured: `origin → github.com/wjb12387767/nexus-agent.git`
+
+### Changed — Defaults
+
+- `astGrep.enabled`: false → **true** (AST structural code search, out-of-box)
+- `sandbox.enabled`: false → **true** (OS-level bash isolation)
+- `checkpoint.enabled`: false → **true** (session checkpoint/rewind)
+- `checkpoint.autoEnabled`: false → **true** (auto file-level checkpoint before
+  bash/edit/write, `/rewind` restores disk)
+- `bashInterceptor.enabled`: false → **true** (intercept cat/grep/find/sed,
+  guide to dedicated tools)
+
+### Added — Skills & Commands
+
+- `memory-routing` skill: defines write/retrieval contracts for mnemopi
+  (session memory) vs Qdrant (document vectors) vs LightRAG (knowledge graph)
+- `tool-priority` skill: scene-based tool selection for document parsing
+  (read/Docling), web interaction (Playwright/native browser/fetch), memory
+  retrieval (recall/Qdrant/LightRAG), and code search (glob/grep/ast_grep)
+- `mcp-health` slash command: three-layer readiness check (Docker container,
+  port reachability, MCP protocol handshake) for all 4 MCP servers
+
 ### Added — Hardening layer
 
 Three capabilities that close known gaps in the upstream agents (omp / Grok
@@ -48,6 +102,36 @@ Build / OpenClaude):
 - **CI matrix**: added `bash-ast: on/off` dimension (2 representative combos)
   and two new jobs — `nexus_bash_ast_test` (Rust + TS) and
   `nexus_destructive_regression` (Linux only).
+
+### Added — Usability enhancements (post-beta, unreleased)
+
+- **Windows one-click launcher** (`start.ps1` + `start.bat`): auto-detects and
+  installs Bun / Rust, refreshes PATH, compiles native modules on first run,
+  then launches the dev server. Supports `-CheckOnly` (toolchain verification)
+  and `-SkipBuild` (skip native module compilation) flags. `start.bat` is a
+  thin wrapper that prefers PowerShell 7 (`pwsh`) and falls back to Windows
+  PowerShell 5.1.
+- **TUI localization (zh-CN)** (`packages/coding-agent/src/modes/i18n/`):
+  bundled Chinese translations for settings, slash commands, options, and
+  tab/group labels. Toggle via `nexus config` → **Language**.
+- **Repo map** (`packages/coding-agent/src/repo-map.ts` +
+  `crates/pi-ast/src/repomap.rs` + `crates/pi-natives/src/repomap.rs`):
+  Rust-powered repository outline generator using tree-sitter symbol
+  extraction + rank scoring, exposed to the agent so it can ground decisions
+  in the actual project structure without reading every file.
+- **Documentation corrections**:
+  - `docs/user-guide.md`: Rust toolchain requirement fixed from
+    `nightly-2026-04-29` to `stable ≥ 1.92.0` (nightly causes native module
+    compatibility issues).
+  - `docs/integration-guide.md`: gRPC section rewritten — the old 6-RPC
+    table (`Prompt` / `StreamTokens` / `SetModel` / `Abort` /
+    `ToolPermission` / `ActionRequired`, all unary/server-stream) is
+    deprecated. The actual protocol is a single bidirectional-stream RPC
+    `Chat(stream ClientMessage) returns (stream ServerMessage)`, with
+    `ChatRequest` / `UserInput` / `CancelSignal` on the client side and
+    `text_chunk` / `tool_start` / `tool_result` / `action_required` / `done`
+    / `error` on the server side. Python / Go / Rust client examples and the
+    permission-interaction section updated to match the real proto.
 
 ### Attribution
 
@@ -265,6 +349,6 @@ All upstream capabilities from Grok Build and OpenClaude ported but not yet
 covered by the release pipeline. See the M2–M8 entries above for what was
 included.
 
-[Unreleased]: https://github.com/nexus-agent/nexus-agent/compare/v1.0.0-beta...HEAD
-[1.0.0-beta]: https://github.com/nexus-agent/nexus-agent/releases/tag/nexus-v1.0.0-beta
-[1.0.0-alpha]: https://github.com/nexus-agent/nexus-agent/releases/tag/nexus-v1.0.0-alpha
+[Unreleased]: https://github.com/wjb12387767/nexus-agent/compare/v1.0.0-beta...HEAD
+[1.0.0-beta]: https://github.com/wjb12387767/nexus-agent/releases/tag/nexus-v1.0.0-beta
+[1.0.0-alpha]: https://github.com/wjb12387767/nexus-agent/releases/tag/nexus-v1.0.0-alpha

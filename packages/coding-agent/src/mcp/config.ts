@@ -282,26 +282,29 @@ export function validateServerConfig(name: string, config: MCPServerConfig): str
 	return errors;
 }
 
-/** Known browser automation MCP server names (lowercase) */
+/** Known browser automation MCP server names (lowercase).
+ * Note: "playwright" is intentionally excluded — Playwright MCP provides
+ * complementary accessibility-snapshot-based automation that coexists with
+ * the native Puppeteer/CDP browser tool, not a replacement. */
 const BROWSER_MCP_NAMES = new Set([
 	"puppeteer",
-	"playwright",
 	"browserbase",
 	"browser-tools",
 	"browser-use",
 	"browser",
 ]);
 
-/** Patterns matching browser MCP package names in command/args */
+/** Patterns matching browser MCP package names in command/args.
+ * Note: @playwright/mcp is excluded to allow Playwright MCP to coexist with
+ * the native browser tool (they serve complementary use cases). */
 const BROWSER_MCP_PKG_PATTERN =
 	// Official packages
 	// - @modelcontextprotocol/server-puppeteer
-	// - @playwright/mcp
 	// - @browserbasehq/mcp-server-browserbase
 	// - @agentdeskai/browser-tools-mcp
 	// - @agent-infra/mcp-server-browser
-	// Community packages: puppeteer-mcp-server, playwright-mcp, pptr-mcp, etc.
-	/(?:@modelcontextprotocol\/server-puppeteer|@playwright\/mcp|@browserbasehq\/mcp-server-browserbase|@agentdeskai\/browser-tools-mcp|@agent-infra\/mcp-server-browser|puppeteer-mcp|playwright-mcp|pptr-mcp|browser-use-mcp|mcp-browser-use)/i;
+	// Community packages: puppeteer-mcp-server, pptr-mcp, etc.
+	/(?:@modelcontextprotocol\/server-puppeteer|@browserbasehq\/mcp-server-browserbase|@agentdeskai\/browser-tools-mcp|@agent-infra\/mcp-server-browser|puppeteer-mcp|pptr-mcp|browser-use-mcp|mcp-browser-use)/i;
 
 /** URL patterns for hosted browser MCP services */
 const BROWSER_MCP_URL_PATTERN = /browserbase\.com|browser-use\.com/i;

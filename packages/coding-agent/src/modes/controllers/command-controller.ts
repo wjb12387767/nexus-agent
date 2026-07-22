@@ -35,6 +35,7 @@ import { MoveOverlay, type MoveOverlayResult } from "../../modes/components/move
 import { TranscriptBlock } from "../../modes/components/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
+import { buildCommandsMarkdown } from "../../modes/utils/commands-markdown";
 import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/context-usage";
 import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
@@ -56,6 +57,7 @@ import {
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { t } from "../i18n";
 
 function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown: string): void {
 	const block = new TranscriptBlock();
@@ -578,6 +580,15 @@ export class CommandController {
 	handleHotkeysCommand(): void {
 		const hotkeys = buildHotkeysMarkdown({ keybindings: this.ctx.keybindings });
 		showMarkdownPanel(this.ctx, "Keyboard Shortcuts", hotkeys);
+	}
+
+	handleHelpCommand(): void {
+		// Title and body are localized via the i18n catalog so the help
+		// panel mirrors the user's `/language` choice (e.g. 中文 after
+		// `/language zh`). The command list itself is regenerated on every
+		// call from the live builtin registry, so plugin-registered
+		// commands appear without a session restart.
+		showMarkdownPanel(this.ctx, t("help.title"), buildCommandsMarkdown());
 	}
 
 	handleToolsCommand(): void {

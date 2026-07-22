@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 /**
@@ -48,6 +49,24 @@ function loadNative() {
 			errors.push(`${candidate}: ${message}`);
 		}
 	}
+
+	// Fallback: scan for ABI-suffixed filename (napi --platform emits
+	// e.g. nexus-checkpoint.win32-x64-msvc.node, but the canonical name
+	// above omits the ABI suffix). Try any file matching the platform-arch prefix.
+	try {
+		const files = fs.readdirSync(nativeDir);
+		for (const f of files) {
+			if (f.startsWith(`nexus-checkpoint.${platformTag}-`) && f.endsWith(".node")) {
+				const candidate = path.join(nativeDir, f);
+				try {
+					return require_(candidate);
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					errors.push(`${candidate}: ${message}`);
+				}
+			}
+		}
+	} catch {}
 
 	const details = errors.map((error) => `- ${error}`).join("\n");
 	throw new Error(

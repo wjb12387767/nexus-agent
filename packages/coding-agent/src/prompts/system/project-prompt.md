@@ -41,6 +41,18 @@ Working directory layout (sorted by mtime, recent first; depth ≤ 3):
 {{/if}}
 {{/if}}
 
+{{#if includeRepoMap}}
+{{#if repoMap.rendered}}
+<repo-map>
+Ranked symbol index of the working tree (top-level definitions, sorted by symbol count + cross-file references; use `read` to inspect bodies):
+{{repoMap.rendered}}
+{{#if repoMap.truncated}}
+(some files elided to stay within the token budget — use `glob`/`grep` to surface the rest)
+{{/if}}
+</repo-map>
+{{/if}}
+{{/if}}
+
 Today is {{date}}, and the current working directory is '{{cwd}}'.
 
 <critical>

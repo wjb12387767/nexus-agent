@@ -425,6 +425,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		skills: availableSkills,
 		autoloadSkills: resolvedAutoloadSkills,
 		workspaceTree: options.session.workspaceTree,
+		repoMap: options.session.repoMap,
 		promptTemplates: options.session.promptTemplates,
 		localProtocolOptions,
 		parentArtifactManager,

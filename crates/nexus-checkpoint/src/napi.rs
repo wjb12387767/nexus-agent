@@ -46,7 +46,7 @@ pub struct CheckpointStoreOptions {
     /// 最大保留 checkpoint 数量（默认 64）。
     pub max_checkpoints: Option<u32>,
     /// 最大总字节数（MB，默认 256）。
-    pub max_size_mb: Option<u64>,
+    pub max_size_mb: Option<u32>,
     /// 驱逐策略（"lru" | "lru-size" | "fifo" | "none"，默认 "lru"）。
     pub swap_policy: Option<String>,
 }
@@ -58,7 +58,7 @@ pub struct CheckpointMetaDto {
     pub label: String,
     pub created_at: String,
     pub num_files: u32,
-    pub size_bytes: u64,
+    pub size_bytes: i64,
 }
 
 /// restore 操作的结果（TS 侧）。
@@ -103,7 +103,7 @@ pub fn create_checkpoint_store(opts: CheckpointStoreOptions) -> Result<Checkpoin
         None => SwapPolicyConfig::default(),
     };
     if let Some(max_mb) = opts.max_size_mb {
-        policy_config.max_size_bytes = max_mb * 1024 * 1024;
+        policy_config.max_size_bytes = (max_mb as u64) * 1024 * 1024;
     }
     policy_config.max_checkpoints = cap;
 
@@ -200,7 +200,7 @@ impl CheckpointStoreHandle {
                 label: m.label,
                 created_at: m.created_at.to_rfc3339(),
                 num_files: m.num_files as u32,
-                size_bytes: m.size_bytes,
+                size_bytes: m.size_bytes as i64,
             })
             .collect())
     }
@@ -232,7 +232,7 @@ impl CheckpointStoreHandle {
     pub async fn update_policy(
         &self,
         max_checkpoints: Option<u32>,
-        max_size_mb: Option<u64>,
+        max_size_mb: Option<u32>,
         swap_policy: Option<String>,
     ) -> Result<()> {
         let mut config = match swap_policy.as_deref() {
@@ -243,7 +243,7 @@ impl CheckpointStoreHandle {
             config.max_checkpoints = cap as usize;
         }
         if let Some(max_mb) = max_size_mb {
-            config.max_size_bytes = max_mb * 1024 * 1024;
+            config.max_size_bytes = (max_mb as u64) * 1024 * 1024;
         }
         self.inner.update_policy(config).await;
         Ok(())

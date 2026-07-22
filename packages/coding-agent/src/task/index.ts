@@ -1475,6 +1475,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				skills: availableSkills,
 				autoloadSkills: resolvedAutoloadSkills,
 				workspaceTree: this.session.workspaceTree,
+				repoMap: this.session.repoMap,
 				promptTemplates,
 				rules: this.session.rules,
 				preloadedExtensionPaths: this.session.extensionPaths,

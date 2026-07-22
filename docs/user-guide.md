@@ -43,7 +43,7 @@ bun install -g @nexus-agent/coding-agent
 ### 从源码构建
 
 ```sh
-git clone https://github.com/nexus-agent/nexus-agent.git
+git clone https://github.com/wjb12387767/nexus-agent.git
 cd nexus-agent
 bun setup      # 安装 workspace 依赖 + 构建 native addon
 bun dev        # 启动 TUI
@@ -51,7 +51,7 @@ bun dev        # 启动 TUI
 
 **前置要求：**
 - Bun ≥ 1.3.14
-- Rust（通过 rustup 安装，nightly-2026-04-29 工具链）
+- Rust ≥ 1.92.0（通过 rustup 安装的 stable 工具链；不要使用 nightly，会导致原生模块兼容性问题）
 - Git ≥ 2.30
 
 ---

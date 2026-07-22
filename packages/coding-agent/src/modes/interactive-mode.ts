@@ -29,6 +29,7 @@ import {
 	clearRenderCache,
 	Loader,
 	Markdown,
+	matchesKey,
 	ProcessTerminal,
 	Spacer,
 	setTerminalTextSizing,
@@ -113,7 +114,11 @@ import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
-import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
+import {
+	BUILTIN_SLASH_COMMAND_RESERVED_NAMES,
+	buildTuiBuiltinSlashCommands,
+	executeBuiltinSlashCommand,
+} from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
@@ -148,7 +153,11 @@ import { PlanReviewOverlay } from "./components/plan-review-overlay";
 import { StatusLineComponent } from "./components/status-line";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
-import { WelcomeComponent, type LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
+import {
+	type WelcomeButtonAction,
+	WelcomeComponent,
+	type LspServerInfo as WelcomeLspServerInfo,
+} from "./components/welcome";
 import { BtwController } from "./controllers/btw-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
@@ -161,6 +170,7 @@ import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
+import { initLanguage, type LanguageSetting } from "./i18n";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
@@ -359,6 +369,20 @@ const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
 const SUBAGENT_HUD_VISIBLE_LIMIT = 8;
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
+
+/**
+ * Welcome-screen button → slash-command map. `/model` (alias `/models`) covers
+ * the Models button; `/resume` opens the session picker for Recent. Each
+ * command is executed via {@link executeBuiltinSlashCommand} so the existing
+ * builtin handler path (status output, picker, settings menu) is reused.
+ */
+const WELCOME_BUTTON_SLASH_COMMAND: Readonly<Record<WelcomeButtonAction, string>> = {
+	new: "/new",
+	models: "/models",
+	recent: "/resume",
+	settings: "/settings",
+	help: "/help",
+};
 
 /**
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
@@ -632,6 +656,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mcpConnectedServers = new Set<string>();
 	#mcpFailedServers = new Map<string, string>();
 	#welcomeComponent?: WelcomeComponent;
+	// Guards against re-registering the welcome-button key listener when init()
+	// runs again (e.g. session switch via #rebuildInteractiveUi). The listener
+	// routes digit keys 1-5 to the welcome buttons' slash commands when the
+	// editor is focused and empty — mirroring InputController's `b`/`c` gates.
+	#welcomeButtonListenerInstalled = false;
 	readonly #chatHost: ChatBlockHost = { requestRender: () => this.ui.requestRender() };
 
 	constructor(
@@ -820,6 +849,51 @@ export class InteractiveMode implements InteractiveModeContext {
 		welcome?.playIntro(() => this.ui.requestComponentRender(welcome));
 	}
 
+	/**
+	 * Wire the welcome screen's action buttons to their slash commands and
+	 * register a global digit-key listener (1-5) so the buttons work from
+	 * the editor — the usual resting focus — without requiring the welcome
+	 * box itself to receive focus. Mirrors the InputController `b`/`c`
+	 * gates: only fires when the editor is focused and empty, so genuine
+	 * numeric input (`git push 1.x`, version pins, etc.) is never hijacked.
+	 */
+	#wireWelcomeButtons(welcome: WelcomeComponent): void {
+		welcome.onButtonAction = (action: WelcomeButtonAction) => {
+			void this.#dispatchWelcomeButton(action);
+		};
+		if (this.#welcomeButtonListenerInstalled) return;
+		this.#welcomeButtonListenerInstalled = true;
+		this.ui.addInputListener(data => {
+			// Skip during the intro animation — the digit keys would race with
+			// the gradient sweep and the buttons are visually in flux.
+			if (this.#welcomeComponent == null) return undefined;
+			let action: WelcomeButtonAction | undefined;
+			if (matchesKey(data, "1")) action = "new";
+			else if (matchesKey(data, "2")) action = "models";
+			else if (matchesKey(data, "3")) action = "recent";
+			else if (matchesKey(data, "4")) action = "settings";
+			else if (matchesKey(data, "5")) action = "help";
+			if (!action) return undefined;
+			// Only trigger when the editor is the focused component and is
+			// empty — same gate as the InputController `b`/`c` shortcuts, so
+			// typing a digit into actual prompt text is never intercepted.
+			if (this.ui.getFocused() !== this.editor) return undefined;
+			if (this.editor.getText().trim()) return undefined;
+			void this.#dispatchWelcomeButton(action);
+			return { consume: true };
+		});
+	}
+
+	/** Dispatch a welcome button's slash command via the builtin registry. */
+	async #dispatchWelcomeButton(action: WelcomeButtonAction): Promise<void> {
+		const command = WELCOME_BUTTON_SLASH_COMMAND[action];
+		try {
+			await executeBuiltinSlashCommand(command, { ctx: this });
+		} catch (err) {
+			logger.warn(`Welcome button "${action}" failed`, { error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
 		if (this.isInitialized) return;
 
@@ -886,6 +960,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (!startupQuiet) {
+			// Initialize the i18n module from the user's `language` setting
+			// before constructing the welcome component so button labels and
+			// the tip pool render in the right language on the very first
+			// frame. `auto` resolves via LANG/LC_ALL (zh* → zh, else en).
+			const langSetting = this.settings.get("language") as LanguageSetting;
+			initLanguage(langSetting);
+
 			// Add welcome header
 			this.#welcomeComponent = new WelcomeComponent(
 				this.#version,
@@ -894,6 +975,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				recentSessions,
 				this.#getWelcomeLspServers(),
 			);
+			this.#wireWelcomeButtons(this.#welcomeComponent);
 
 			// Setup UI layout
 			this.ui.addChild(new Spacer(1));
@@ -4151,6 +4233,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleHotkeysCommand(): void {
 		this.#commandController.handleHotkeysCommand();
+	}
+
+	handleHelpCommand(): void {
+		this.#commandController.handleHelpCommand();
 	}
 
 	handleToolsCommand(): void {

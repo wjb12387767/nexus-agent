@@ -84,7 +84,7 @@ const SIGNATURE_PATTERNS: RegExp[] = [
 	/^\s*(?:public|private|protected|internal|static|sealed|abstract)\s+ (?:class|interface|struct|enum|record)\s+\w+/,
 ];
 
-/** 注释行正则：支持 // 和 # 和 /* * */ */
+// 注释行正则：支持 // 和 # 和 /* * */ 等多种形式
 const COMMENT_RE = /^\s*(\/\/|#|\/\*|\*|<!--|--|;;)/;
 
 /**

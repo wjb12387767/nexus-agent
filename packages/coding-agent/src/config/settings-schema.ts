@@ -145,6 +145,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Execution",
 		"Discovery & MCP",
 		"Developer",
+		"File Checkpoint",
 	],
 	tasks: ["Modes", "Subagents", "Isolation", "Commands & Skills"],
 	providers: ["Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
@@ -597,6 +598,24 @@ export const SETTINGS_SCHEMA = {
 			group: "Theme",
 			label: "Color-Blind Mode",
 			description: "Use blue instead of green for diff additions",
+		},
+	},
+
+	language: {
+		type: "enum",
+		values: ["auto", "en", "zh"] as const,
+		default: "auto",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Language",
+			description:
+				"UI language for the welcome screen, action buttons, and tips. `auto` detects from your system locale (LANG/LC_ALL).",
+			options: [
+				{ value: "auto", label: "Auto", description: "Detect from system locale (default)" },
+				{ value: "en", label: "English", description: "English UI" },
+				{ value: "zh", label: "中文", description: "简体中文界面" },
+			],
 		},
 	},
 
@@ -1182,6 +1201,18 @@ export const SETTINGS_SCHEMA = {
 			label: "Include Workspace Tree",
 			description:
 				"Render the workspace directory tree in the system prompt. WARNING: This can bust prompt caching across sessions when files are modified.",
+		},
+	},
+
+	includeRepoMap: {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Prompt",
+			label: "Include Repo Map",
+			description:
+				"Render a ranked symbol index (top-level definitions across the working tree, scored by symbol count and cross-file references) in the system prompt. Complements the workspace tree; same prompt-cache caveat applies.",
 		},
 	},
 
@@ -3398,7 +3429,11 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"How to handle sandbox violations: log (record and continue), deny (block the operation), warn (record and surface to user)",
 			options: [
-				{ value: "log", label: "Log", description: "Record violations to ~/.nexus/sandbox-events.jsonl and continue" },
+				{
+					value: "log",
+					label: "Log",
+					description: "Record violations to ~/.nexus/sandbox-events.jsonl and continue",
+				},
 				{ value: "deny", label: "Deny", description: "Block violating operations (kernel-enforced)" },
 				{ value: "warn", label: "Warn", description: "Record and surface a warning to the user" },
 			],
@@ -3751,7 +3786,7 @@ export const SETTINGS_SCHEMA = {
 
 	"checkpoint.enabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "tools",
 			group: "Available Tools",

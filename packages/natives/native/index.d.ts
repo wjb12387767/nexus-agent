@@ -413,6 +413,40 @@ export interface AstReplaceResult {
   parseErrors?: Array<string>
 }
 
+/** [`parse_bash_command`] 的返回结构。 */
+export interface BashAstResult {
+  /** 解析得到的根节点；空命令或 abort 时为 `None`。 */
+  rootNode?: BashNode
+  /** `true` = 解析超时 / 超 node budget / 解析失败 / 命令超长。 */
+  aborted: boolean
+  /** 实际遍历到的节点数（abort 时为截断时的计数）。 */
+  nodeCount: number
+  /** 解析 + 遍历总耗时（毫秒）。 */
+  parseTimeMs: number
+}
+
+/** tree-sitter-bash AST 节点，递归结构。 */
+export interface BashNode {
+  /** tree-sitter 节点类型，如 "program"、"command"、"word"、"pipeline"。 */
+  nodeType: string
+  /** 节点对应的原文切片（UTF-8）。 */
+  text: string
+  /** 起始字节偏移（UTF-8 字节索引，inclusive）。 */
+  startByte: number
+  /** 结束字节偏移（UTF-8 字节索引，exclusive）。 */
+  endByte: number
+  /** 起始行（0-based）。 */
+  startRow: number
+  /** 起始列（0-based 字节偏移）。 */
+  startCol: number
+  /** 结束行（0-based）。 */
+  endRow: number
+  /** 结束列（0-based 字节偏移）。 */
+  endCol: number
+  /** 递归子节点列表。 */
+  children: Array<BashNode>
+}
+
 export interface BlockRange {
   /** 1-indexed inclusive first line of the resolved block. */
   startLine: number
@@ -439,6 +473,18 @@ export interface BlockRangeOptions {
   /** 1-indexed source line the block must begin on. */
   line: number
 }
+
+/**
+ * Build a repository-level symbol map ("repo-map") for system-prompt context.
+ *
+ * Walks the working tree under `root`, parses every source file whose
+ * extension maps to a [`pi_ast::SupportLang`], extracts top-level definitions
+ * via tree-sitter, scores files by symbol count + cross-file coupling, and
+ * renders a token-budgeted ranked listing.
+ *
+ * Returns a Promise that resolves to [`RepoMapResult`].
+ */
+export declare function buildRepoMap(options: RepoMapOptions): Promise<RepoMapResult>
 
 /** Clipboard image payload encoded as PNG bytes. */
 export interface ClipboardImage {
@@ -568,6 +614,20 @@ export interface ExtractSegmentsResult {
   after: string
   /** Visible width of the `after` segment. */
   afterWidth: number
+}
+
+/** Per-file extraction result. */
+export interface FileSymbols {
+  /** Repository-relative path with forward slashes. */
+  path: string
+  /** Canonical language name (e.g. "rust", "typescript"). */
+  language: string
+  /** Top-level symbols discovered. */
+  symbols: Array<SymbolEntry>
+  /** Total source lines. */
+  totalLines: number
+  /** True when `max_symbols_per_file` truncated extraction. */
+  truncated: boolean
 }
 
 /** Resolved filesystem entry kind for glob filters and match metadata. */
@@ -1196,6 +1256,20 @@ export interface MinimizerResult {
   outputBytes: number
 }
 
+/**
+ * 解析 bash 命令字符串并返回结构化 AST。
+ *
+ * 行为约定：
+ * - 空命令：返回 `root_node: None, aborted: false`
+ * - 命令长度 > 10000：直接返回 `aborted: true`，不进入 parser
+ * - 解析失败 / 遍历超 50ms / 节点数 > 50000：返回 `aborted: true`
+ *
+ * 根节点类型恒为 `"program"`（tree-sitter-bash 语法规定）；
+ * pipeline / redirected_statement / declaration_command 等结构作为
+ * program 的子节点出现。
+ */
+export declare function parseBashCommand(command: string): BashAstResult
+
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
   /** Primary codepoint associated with the key. */
@@ -1339,6 +1413,44 @@ export declare function readImageFromClipboard(): Promise<ClipboardImage | undef
  * JS-side re-encode.
  */
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
+
+/** Options for [`build_repo_map`]. */
+export interface RepoMapOptions {
+  /** Repository root to scan (absolute path recommended). */
+  root: string
+  /** Maximum rendered output lines. Defaults to 200. */
+  maxLines?: number
+  /** Maximum files to scan with tree-sitter. Defaults to 2000. */
+  maxFiles?: number
+  /** Maximum symbols kept per file. Defaults to 40. */
+  maxSymbolsPerFile?: number
+  /** Optional gitignore-style glob whitelist. */
+  includeGlobs?: Array<string>
+  /** Optional glob blacklist applied after the whitelist. */
+  excludeGlobs?: Array<string>
+  /** Wall-clock budget in milliseconds. Soft limit. */
+  timeoutMs?: number
+  /** Optional cancellation signal (AbortSignal). */
+  signal?: unknown
+}
+
+/** Final rendered repo-map result. */
+export interface RepoMapResult {
+  /** Repository root that was scanned. */
+  root: string
+  /** Rendered text block ready for prompt injection. */
+  rendered: string
+  /** True when output was capped by `max_lines`. */
+  truncated: boolean
+  /** Total source lines across all scanned files. */
+  totalLines: number
+  /** Number of files that contributed symbols. */
+  fileCount: number
+  /** Number of files skipped (language unrecognized or scan limit hit). */
+  skipped: number
+  /** Symbols per file, in ranked order (highest score first). */
+  files: Array<FileSymbols>
+}
 
 /**
  * Search content for a pattern (one-shot, compiles pattern each time).
@@ -1582,6 +1694,16 @@ export interface SummarySegment {
  * mapping.
  */
 export declare function supportsLanguage(lang: string): boolean
+
+/** One extracted definition. */
+export interface SymbolEntry {
+  /** Display kind label, e.g. "fn", "class", "struct". */
+  kind: string
+  /** Declared name; empty for anonymous definitions. */
+  name: string
+  /** 1-based start line. */
+  startLine: number
+}
 
 /**
  * Truncate text to a visible width, preserving ANSI codes.

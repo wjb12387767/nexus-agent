@@ -9,7 +9,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nexus-agent/nexus-agent.git",
+    "url": "git+https://github.com/wjb12387767/nexus-agent.git",
     "directory": "packages/nexus-grpc"
   },
   "keywords": [

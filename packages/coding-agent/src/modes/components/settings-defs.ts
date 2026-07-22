@@ -24,6 +24,8 @@ import {
 	type SubmenuOption,
 	TAB_GROUPS,
 } from "../../config/settings-schema";
+import { getCurrentLanguage, t } from "../i18n";
+import { trOption, trSetting } from "../i18n/settings";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UI Definition Types
@@ -139,13 +141,35 @@ function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {
 	return ui.options;
 }
 
+/**
+ * Apply Chinese translations to a list of submenu options. The schema
+ * declares options inline (English labels); this maps each option's
+ * `label`/`description` through {@link trOption} using the setting path
+ * and the option's `value` as the lookup key. English fallback when no
+ * translation exists or the active language is `en`.
+ */
+function translateOptions(path: SettingPath, options: OptionList): OptionList {
+	return options.map(opt => ({
+		...opt,
+		label: trOption(path, opt.value, "label", opt.label),
+		description: opt.description ? trOption(path, opt.value, "description", opt.description) : undefined,
+	}));
+}
+
 function pathToSettingDef(path: SettingPath): SettingDef | null {
 	const ui = getUi(path);
 	if (!ui) return null;
 
 	const schemaType = getType(path);
 	const condition = ui.condition ? CONDITIONS[ui.condition] : undefined;
-	const base = { path, label: ui.label, description: ui.description, tab: ui.tab, group: ui.group, condition };
+	const base = {
+		path,
+		label: trSetting(path, "label", ui.label),
+		description: trSetting(path, "description", ui.description),
+		tab: ui.tab,
+		group: ui.group,
+		condition,
+	};
 
 	if (schemaType === "boolean") {
 		return { ...base, type: "boolean" };
@@ -159,13 +183,13 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 		}
 		// "runtime" is not a valid sentinel for enums — schema types prevent this,
 		// but treat defensively as an empty submenu.
-		return { ...base, type: "submenu", options: options === "runtime" ? [] : options };
+		return { ...base, type: "submenu", options: options === "runtime" ? [] : translateOptions(path, options) };
 	}
 
 	if (schemaType === "number") {
 		// Numbers without options are intentionally hidden from the UI.
 		if (!options || options === "runtime") return null;
-		return { ...base, type: "submenu", options };
+		return { ...base, type: "submenu", options: translateOptions(path, options) };
 	}
 
 	if (schemaType === "string") {
@@ -174,7 +198,7 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 			return { ...base, type: "submenu", options: [] };
 		}
 		if (options) {
-			return { ...base, type: "submenu", options };
+			return { ...base, type: "submenu", options: translateOptions(path, options) };
 		}
 		return { ...base, type: "text" };
 	}
@@ -190,12 +214,14 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 // Public API
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Cache of generated definitions */
+/** Cache of generated definitions (keyed by active language so switching language invalidates it). */
 let cachedDefs: SettingDef[] | null = null;
+let cachedDefsLang: string | null = null;
 
 /** Get all setting definitions with UI */
 export function getAllSettingDefs(): SettingDef[] {
-	if (cachedDefs) return cachedDefs;
+	const lang = getCurrentLanguage();
+	if (cachedDefs && cachedDefsLang === lang) return cachedDefs;
 
 	const defs: SettingDef[] = [];
 	for (const tab of SETTING_TABS) {
@@ -205,6 +231,7 @@ export function getAllSettingDefs(): SettingDef[] {
 		}
 	}
 	cachedDefs = defs;
+	cachedDefsLang = lang;
 	return defs;
 }
 
@@ -233,6 +260,6 @@ export function getSettingDef(path: SettingPath): SettingDef | undefined {
 export function getDisplayDefault(path: SettingPath): string {
 	const value = getDefault(path);
 	if (value === undefined) return "";
-	if (typeof value === "boolean") return value ? "true" : "false";
+	if (typeof value === "boolean") return value ? t("settings.boolean.true") : t("settings.boolean.false");
 	return String(value);
 }

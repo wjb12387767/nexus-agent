@@ -3,19 +3,20 @@
   "name": "@oh-my-pi/pi-coding-agent",
   "version": "17.0.2",
   "description": "Coding agent CLI with read, bash, edit, write tools and session management",
-  "homepage": "https://nexus.agent",
-  "author": "Can Boluk",
+  "homepage": "https://github.com/wjb12387767/nexus-agent",
+  "author": "Nexus Agent Contributors",
   "contributors": [
+    "Can Boluk (omp upstream)",
     "Mario Zechner"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/can1357/oh-my-pi.git",
+    "url": "git+https://github.com/wjb12387767/nexus-agent.git",
     "directory": "packages/coding-agent"
   },
   "bugs": {
-    "url": "https://github.com/can1357/oh-my-pi/issues"
+    "url": "https://github.com/wjb12387767/nexus-agent/issues"
   },
   "keywords": [
     "coding-agent",
@@ -53,6 +54,7 @@
     "@babel/parser": "catalog:",
     "@mozilla/readability": "catalog:",
     "@nexus-agent/bash-ast": "workspace:*",
+    "@nexus-agent/checkpoint": "workspace:*",
     "@nexus-agent/grpc": "workspace:*",
     "@nexus-agent/routing": "workspace:*",
     "@oh-my-pi/hashline": "catalog:",

@@ -8,11 +8,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nexus-agent/nexus-agent.git",
+    "url": "git+https://github.com/wjb12387767/nexus-agent.git",
     "directory": "packages/nexus-bash-ast"
   },
   "bugs": {
-    "url": "https://github.com/nexus-agent/nexus-agent/issues"
+    "url": "https://github.com/wjb12387767/nexus-agent/issues"
   },
   "keywords": [
     "bash",

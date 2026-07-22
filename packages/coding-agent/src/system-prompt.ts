@@ -28,6 +28,7 @@ import { shortenPath } from "./tools/render-utils";
 import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
 import { formatLocalCalendarDate } from "./utils/local-date";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { type RepoMap, buildRepoMap } from "./repo-map";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
 /** Bundled personality specs, keyed by the `personality` setting value. */
@@ -491,6 +492,8 @@ export interface BuildSystemPromptOptions {
 	secretsEnabled?: boolean;
 	/** Pre-loaded workspace tree (skips discovery if provided). May be a Promise to allow early kick-off. */
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
+	/** Pre-loaded repo-map (skips discovery if provided). May be a Promise to allow early kick-off. */
+	repoMap?: RepoMap | Promise<RepoMap>;
 	/** Whether the local memory://root summary is active. */
 	memoryRootEnabled?: boolean;
 	/** Active model identifier (e.g. "anthropic/claude-opus-4") used by prompt policy and optionally surfaced. */
@@ -501,6 +504,8 @@ export interface BuildSystemPromptOptions {
 	personality?: Personality;
 	/** Whether to include the workspace directory tree in the system prompt. Default: false */
 	includeWorkspaceTree?: boolean;
+	/** Whether to include the repo-map (ranked symbol index) in the system prompt. Default: false */
+	includeRepoMap?: boolean;
 	/** Whether Mermaid fenced blocks render as terminal ASCII diagrams. Default: true */
 	renderMermaid?: boolean;
 	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
@@ -548,11 +553,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		taskIrcEnabled = false,
 		secretsEnabled = false,
 		workspaceTree: providedWorkspaceTree,
+		repoMap: providedRepoMap,
 		memoryRootEnabled = false,
 		model,
 		includeModelInPrompt = true,
 		personality = "default",
 		includeWorkspaceTree = false,
+		includeRepoMap = false,
 		renderMermaid = true,
 		xdevTools = [],
 		xdevDocs = "",
@@ -575,6 +582,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			totalLines: 0,
 			agentsMdFiles: [],
 		} satisfies WorkspaceTree,
+		repoMap: {
+			rootPath: resolvedCwd,
+			rendered: "",
+			truncated: false,
+			totalLines: 0,
+			filesScanned: 0,
+		} satisfies RepoMap,
 		activeRepoContext: null as ActiveRepoContext | null,
 		cpuModel: undefined as string | undefined,
 		gpu: undefined as string | undefined,
@@ -637,6 +651,20 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 						totalLines: 0,
 						agentsMdFiles: [],
 					});
+	const repoMapPromise =
+		providedRepoMap !== undefined
+			? Promise.resolve(providedRepoMap)
+			: includeRepoMap
+				? logger.time("buildRepoMap", () =>
+						buildRepoMap(resolvedCwd, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS }),
+					)
+				: Promise.resolve({
+						rootPath: resolvedCwd,
+						rendered: "",
+						truncated: false,
+						totalLines: 0,
+						filesScanned: 0,
+					});
 	const skillsPromise: Promise<readonly Skill[]> =
 		providedSkills !== undefined
 			? Promise.resolve(providedSkills)
@@ -657,6 +685,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles,
 		skills,
 		workspaceTree,
+		repoMap,
 		activeRepoContext,
 		cpuModel,
 		gpu,
@@ -681,6 +710,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		),
 		withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
 		withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
+		withDeadline("buildRepoMap", repoMapPromise, prepDefaults.repoMap),
 		withDeadline("resolveActiveRepoContext", activeRepoContextPromise, prepDefaults.activeRepoContext),
 		withDeadline("getCpuModel", cpuModelPromise, prepDefaults.cpuModel),
 		withDeadline("getCachedGpu", gpuPromise, prepDefaults.gpu),
@@ -784,6 +814,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
+		repoMap,
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
@@ -804,6 +835,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasMemoryRoot: memoryRootEnabled,
 		hasObsidian: hasObsidian(),
 		includeWorkspaceTree,
+		includeRepoMap,
 		renderMermaid,
 		xdevTools,
 		xdevDocs,

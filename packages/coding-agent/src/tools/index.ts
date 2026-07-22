@@ -31,6 +31,7 @@ import type { AgentOutputManager } from "../task/output-manager";
 import { canSpawnAtDepth } from "../task/types";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
+import type { RepoMap } from "../repo-map";
 import type { WorkspaceTree } from "../workspace-tree";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
@@ -160,6 +161,8 @@ export interface ToolSession {
 	contextFiles?: ContextFileEntry[];
 	/** Pre-loaded workspace tree (forwarded to subagents to skip re-scanning) */
 	workspaceTree?: WorkspaceTree;
+	/** Pre-loaded repo-map (forwarded to subagents to skip re-scanning) */
+	repoMap?: RepoMap;
 	/** Pre-loaded skills */
 	skills?: readonly Skill[];
 	/** Rediscover live session skills after a tool mutates their backing files. */

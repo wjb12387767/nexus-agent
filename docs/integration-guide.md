@@ -26,16 +26,21 @@ nexus grpc --port 50051
 
 server 监听 `127.0.0.1:50051`（默认仅本机访问，可用 `--bind 0.0.0.0` 暴露到网络）。
 
-协议定义见 `packages/nexus-grpc/proto/nexus.proto`，关键 RPC：
+协议定义见 `packages/nexus-grpc/proto/nexus.proto`。Nexus gRPC 服务只暴露 **一个双向流 RPC `Chat`**，所有交互（发送 prompt、流式接收 token / 工具事件、取消、切模型）都通过同一条流上的 `ClientMessage` / `ServerMessage` 完成：
 
-| RPC | 类型 | 说明 |
+| 消息方向 | 类型 | 说明 |
 |---|---|---|
-| `Prompt` | unary | 同步发送 prompt，等待完整回复 |
-| `StreamTokens` | server stream | 流式返回 token（适用于长回复） |
-| `SetModel` | unary | 切换当前会话的模型 |
-| `Abort` | unary | 中止当前生成 |
-| `ToolPermission` | unary | 授权/拒绝某个工具调用 |
-| `ActionRequired` | server stream | 监听需要用户授权的事件 |
+| Client → Server | `ClientMessage.request` (`ChatRequest`) | 会话握手：携带 `message`（初始 prompt）、`working_directory`、`model`、`session_id` |
+| Client → Server | `ClientMessage.input` (`UserInput`) | 对 agent 提问的应答（如命令确认 `y`/`no`、澄清说明），通过 `prompt_id` 关联 |
+| Client → Server | `ClientMessage.cancel` (`CancelSignal`) | 取消当前生成（等价于 ESC） |
+| Server → Client | `ServerMessage.text_chunk` | 来自 LLM 的流式文本块 |
+| Server → Client | `ServerMessage.tool_start` | agent 开始使用工具（`tool_name`、`arguments_json`、`tool_use_id`） |
+| Server → Client | `ServerMessage.tool_result` | 工具返回结果（`output`、`is_error`、`tool_use_id`） |
+| Server → Client | `ServerMessage.action_required` | agent 请求人工介入（`CONFIRM_COMMAND` 或 `REQUEST_INFORMATION`） |
+| Server → Client | `ServerMessage.done` | 生成成功完成（含 `full_text` 与 token 统计） |
+| Server → Client | `ServerMessage.error` | 严重错误（`message`、`code`） |
+
+> 注：旧文档中列出的 `Prompt`、`StreamTokens`、`SetModel`、`Abort`、`ToolPermission`、`ActionRequired` 等 unary/server-stream RPC **已废弃**，统一收敛到 `Chat` 双向流。模型切换通过在 `ChatRequest.model` 中指定 `provider/model` 实现；工具授权通过 `ServerMessage.action_required` 推送 `prompt_id`，客户端用 `UserInput.prompt_id` + `reply`（如 `"y"`/`"n"`）回传决策。
 
 ### Python 客户端
 
@@ -43,7 +48,7 @@ server 监听 `127.0.0.1:50051`（默认仅本机访问，可用 `--bind 0.0.0.0
 
 ```python
 import grpc
-from nexus_pb2 import PromptRequest, SetModelRequest
+from nexus_pb2 import ClientMessage, ChatRequest, UserInput, CancelSignal
 from nexus_pb2_grpc import NexusStub
 
 # 生成 stub：
@@ -52,16 +57,44 @@ from nexus_pb2_grpc import NexusStub
 channel = grpc.insecure_channel("127.0.0.1:50051")
 client = NexusStub(channel)
 
-# 切换模型
-client.SetModel(SetModelRequest(model="claude-3-5-sonnet-20241022"))
+def chat(prompt: str, model: str = "claude-3-5-sonnet-20241022"):
+    def request_iter():
+        # 1) 会话握手 + 发起 prompt
+        yield ClientMessage(request=ChatRequest(
+            message=prompt,
+            working_directory=".",
+            model=model,
+            session_id="demo",
+        ))
+        # 2) 需要时可以中途取消：
+        #    yield ClientMessage(cancel=CancelSignal(reason="user_abort"))
 
-# 同步 prompt
-resp = client.Prompt(PromptRequest(text="解释这段代码：def fib(n): ..."))
-print(resp.text)
-
-# 流式 prompt
-for chunk in client.StreamTokens(PromptRequest(text="写一个二分查找")):
-    print(chunk.token, end="", flush=True)
+    stream = client.Chat(request_iter())
+    for msg in stream:
+        kind = msg.WhichOneof("event")
+        if kind == "text_chunk":
+            print(msg.text_chunk.text, end="", flush=True)
+        elif kind == "tool_start":
+            print(f"\n[tool_start] {msg.tool_start.tool_name}({msg.tool_start.arguments_json})")
+        elif kind == "tool_result":
+            tag = "[ERR]" if msg.tool_result.is_error else "[OK]"
+            print(f"\n[tool_result]{tag} {msg.tool_result.tool_name}: {msg.tool_result.output}")
+        elif kind == "action_required":
+            a = msg.action_required
+            print(f"\n[action_required] {a.question}")
+            # 危险命令拒绝，其他放行
+            allow = not (a.type == a.CONFIRM_COMMAND and "rm -rf" in a.question)
+            # 必须在同一条流上回传 UserInput,带 prompt_id
+            yield ClientMessage(input=UserInput(
+                prompt_id=a.prompt_id,
+                reply="y" if allow else "n",
+            ))
+        elif kind == "done":
+            print(f"\n[done] tokens={msg.done.prompt_tokens}+{msg.done.completion_tokens}")
+            break
+        elif kind == "error":
+            print(f"\n[error] {msg.error.message} (code={msg.error.code})")
+            break
 ```
 
 ### Go 客户端
@@ -81,13 +114,48 @@ func main() {
 	defer conn.Close()
 	client := pb.NewNexusClient(conn)
 
-	// 流式 prompt
-	stream, _ := client.StreamTokens(context.Background(),
-		&pb.PromptRequest{Text: "写一个二分查找"})
+	stream, _ := client.Chat(context.Background())
+
+	// 1) 握手 + 发送 prompt
+	stream.Send(&pb.ClientMessage{
+		Payload: &pb.ClientMessage_Request{
+			Request: &pb.ChatRequest{
+				Message:          "写一个二分查找",
+				WorkingDirectory: ".",
+				Model:            "claude-3-5-sonnet-20241022",
+				SessionId:        "demo",
+			},
+		},
+	})
+
+	// 2) 接收事件
 	for {
-		chunk, err := stream.Recv()
+		msg, err := stream.Recv()
 		if err != nil { break }
-		fmt.Print(chunk.Token)
+		switch e := msg.Event.(type) {
+		case *pb.ServerMessage_TextChunk:
+			fmt.Print(e.TextChunk.Text)
+		case *pb.ServerMessage_ToolStart:
+			fmt.Printf("\n[tool_start] %s(%s)", e.ToolStart.ToolName, e.ToolStart.ArgumentsJson)
+		case *pb.ServerMessage_ToolResult:
+			fmt.Printf("\n[tool_result] %s: %s", e.ToolResult.ToolName, e.ToolResult.Output)
+		case *pb.ServerMessage_ActionRequired:
+			// 回传权限决策
+			stream.Send(&pb.ClientMessage{
+				Payload: &pb.ClientMessage_Input{
+					Input: &pb.UserInput{
+						PromptId: e.ActionRequired.PromptId,
+						Reply:    "y",
+					},
+				},
+			})
+		case *pb.ServerMessage_Done:
+			fmt.Println("\n[done]")
+			return
+		case *pb.ServerMessage_Error:
+			fmt.Printf("\n[error] %s\n", e.Error.Message)
+			return
+		}
 	}
 }
 ```
@@ -98,16 +166,48 @@ func main() {
 
 ```rust
 use nexus_proto::nexus_client::NexusClient;
-use nexus_proto::PromptRequest;
+use nexus_proto::{client_message::Payload, ChatRequest, ClientMessage};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = NexusClient::connect("http://127.0.0.1:50051").await?;
-    let mut stream = client.stream_tokens(
-        tonic::Request::new(PromptRequest { text: "写一个二分查找".into() })
-    ).await?.into_inner();
-    while let Some(chunk) = stream.message().await? {
-        print!("{}", chunk.token);
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+
+    // 发送握手 + 初始 prompt
+    tx.send(ClientMessage {
+        payload: Some(Payload::Request(ChatRequest {
+            message: "写一个二分查找".into(),
+            working_directory: ".".into(),
+            model: Some("claude-3-5-sonnet-20241022".into()),
+            session_id: "demo".into(),
+        })),
+    }).await?;
+
+    let mut stream = client.chat(tokio_stream::wrappers::ReceiverStream::new(rx)).await?.into_inner();
+    while let Some(msg) = stream.message().await? {
+        match msg.event {
+            Some(nexus_proto::server_message::Event::TextChunk(c)) => print!("{}", c.text),
+            Some(nexus_proto::server_message::Event::ToolStart(t)) => {
+                println!("\n[tool_start] {}({})", t.tool_name, t.arguments_json);
+            }
+            Some(nexus_proto::server_message::Event::ToolResult(r)) => {
+                println!("\n[tool_result] {}: {}", r.tool_name, r.output);
+            }
+            Some(nexus_proto::server_message::Event::ActionRequired(a)) => {
+                // 回传权限决策
+                tx.send(ClientMessage {
+                    payload: Some(Payload::Input(nexus_proto::UserInput {
+                        prompt_id: a.prompt_id,
+                        reply: "y".into(),
+                    })),
+                }).await?;
+            }
+            Some(nexus_proto::server_message::Event::Done(_)) => { println!("\n[done]"); break; }
+            Some(nexus_proto::server_message::Event::Error(e)) => {
+                println!("\n[error] {}", e.message); break;
+            }
+            None => {}
+        }
     }
     Ok(())
 }
@@ -115,23 +215,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 权限交互
 
-当 Agent 需要执行工具调用（如运行 bash 命令）时，会通过 `ActionRequired` 流推送一个授权请求。客户端需要决定是否授权，并通过 `ToolPermission` 回复：
+当 Agent 需要执行工具调用（如运行 bash 命令）时，会通过 `ServerMessage.action_required` 推送一个授权请求（携带 `prompt_id` 和 `question`）。客户端必须在同一条 `Chat` 流上通过 `ClientMessage.input` (`UserInput`) 回传决策，`UserInput.prompt_id` 必须与 `ActionRequired.prompt_id` 匹配，`reply` 通常是 `"y"` / `"n"`（`CONFIRM_COMMAND`）或一段文本（`REQUEST_INFORMATION`）：
 
 ```python
-# 监听授权请求
-def listen_actions():
-    for action in client.ActionRequired(google.protobuf.empty_pb2.Empty()):
-        if action.tool == "bash" and "rm -rf" in action.args.get("command", ""):
-            client.ToolPermission(ToolPermissionRequest(
-                action_id=action.id, allow=False))
-        else:
-            client.ToolPermission(ToolPermissionRequest(
-                action_id=action.id, allow=True))
-
-# 在单独线程跑
-import threading
-threading.Thread(target=listen_actions, daemon=True).start()
+# 在接收循环里处理 action_required 事件
+elif kind == "action_required":
+    a = msg.action_required
+    print(f"\n[action_required] {a.question}")
+    # 危险命令拒绝,其他放行
+    allow = not (a.type == a.CONFIRM_COMMAND and "rm -rf" in a.question)
+    # 通过同一条流回传 UserInput
+    yield ClientMessage(input=UserInput(
+        prompt_id=a.prompt_id,
+        reply="y" if allow else "n",
+    ))
 ```
+
+> 注：`UserInput` 专门用于应答 agent 的提问（`prompt_id` 必须匹配）。要发起一次新的 prompt，应发送新的 `ChatRequest`（开启新会话）或在新流上发起。
 
 ### 完整示例
 
@@ -230,10 +330,22 @@ nexus config routing
 
 ### 在 gRPC 中切换模型
 
-通过 `SetModel` RPC 在运行时切换当前会话的模型：
+gRPC 协议在 `ChatRequest.model` 中指定模型（格式 `provider/model`），仅握手时设置。要切换模型，需要结束当前 `Chat` 流并以新的 `ChatRequest.model` 重新发起；如果使用了 `session_id`，会话上下文会跨流持久化：
 
 ```python
-client.SetModel(SetModelRequest(model="deepseek/deepseek-coder"))
+# 第一次会话用 sonnet
+yield ClientMessage(request=ChatRequest(
+    message="解释这段代码",
+    model="claude-3-5-sonnet-20241022",
+    session_id="my-session",
+))
+
+# 切换到 deepseek-coder 继续同一会话
+yield ClientMessage(request=ChatRequest(
+    message="继续优化",
+    model="deepseek/deepseek-coder",
+    session_id="my-session",  # 复用同一会话上下文
+))
 ```
 
 ### subagent 调度

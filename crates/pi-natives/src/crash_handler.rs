@@ -93,6 +93,8 @@ pub fn install() {
 			},
 		}));
 
+		// nightly 专属:OOM 错误钩子。stable 编译时跳过(丢失 OOM 崩溃报告)
+		#[cfg(feature = "nightly")]
 		std::alloc::set_alloc_error_hook(|layout| {
 			// Print the canonical line before doing anything allocation-prone.
 			// If this is genuine process-wide OOM, report formatting/path work may

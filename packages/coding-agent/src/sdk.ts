@@ -196,6 +196,7 @@ import { ttsTool } from "./tools/tts";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { buildNamedToolChoice } from "./utils/tool-choice";
+import { buildRepoMap, type RepoMap } from "./repo-map";
 import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
 type AsyncResultEntry = {
@@ -477,6 +478,8 @@ export interface CreateAgentSessionOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-built workspace tree (skips re-scanning; passed by parents to subagents). */
 	workspaceTree?: WorkspaceTree;
+	/** Pre-built repo-map (skips re-scanning; passed by parents to subagents). */
+	repoMap?: RepoMap;
 	/** Prompt templates. Default: discovered from cwd/.omp/prompts/ + agentDir/prompts/ */
 	promptTemplates?: PromptTemplate[];
 	/** File-based slash commands. Default: discovered from commands/ directories */
@@ -611,6 +614,7 @@ export type { FileSlashCommand } from "./extensibility/slash-commands";
 export type { MCPManager, MCPServerConfig, MCPServerConnection, MCPToolsLoadResult } from "./mcp";
 export type { Tool } from "./tools";
 export { buildDirectoryTree, buildWorkspaceTree, type DirectoryTree, type WorkspaceTree } from "./workspace-tree";
+export { buildRepoMap, type RepoMap } from "./repo-map";
 
 export {
 	// Individual tool classes (for custom usage)
@@ -813,6 +817,7 @@ export interface BuildSystemPromptOptions {
 	appendPrompt?: string;
 	inlineToolDescriptors?: boolean;
 	includeWorkspaceTree?: boolean;
+	includeRepoMap?: boolean;
 }
 
 /**
@@ -831,6 +836,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		appendSystemPrompt: options.appendPrompt,
 		inlineToolDescriptors: options.inlineToolDescriptors,
 		includeWorkspaceTree: options.includeWorkspaceTree,
+		includeRepoMap: options.includeRepoMap,
 		toolNames: options.tools?.map(tool => tool.name),
 		tools: toolMap ? buildSystemPromptToolMetadata(toolMap) : undefined,
 	});
@@ -1233,6 +1239,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			? logger.time("buildWorkspaceTree", () => buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }))
 			: Promise.resolve({ rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] });
 	workspaceTreePromise.catch(() => {});
+	const includeRepoMap = settings.get("includeRepoMap") ?? false;
+	const repoMapPromise: Promise<RepoMap> = options.repoMap
+		? Promise.resolve(options.repoMap)
+		: includeRepoMap
+			? logger.time("buildRepoMap", () => buildRepoMap(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }))
+			: Promise.resolve({ rootPath: cwd, rendered: "", truncated: false, totalLines: 0, filesScanned: 0 });
+	repoMapPromise.catch(() => {});
 
 	// Independent discoveries that depend only on cwd/agentDir — kicked off in parallel and awaited
 	// at their respective consumer sites. Their work can overlap with model resolution, secret loading,
@@ -1531,10 +1544,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		return result;
 	};
-	const [contextFiles, resolvedWorkspaceTree, watchdogFiles, activeRepoContext, discoveredAdvisors] =
+	const [contextFiles, resolvedWorkspaceTree, resolvedRepoMap, watchdogFiles, activeRepoContext, discoveredAdvisors] =
 		await Promise.all([
 			contextFilesPromise,
 			raceWithDeadline("buildWorkspaceTree", workspaceTreePromise),
+			raceWithDeadline("buildRepoMap", repoMapPromise),
 			watchdogFilesPromise,
 			activeRepoContextPromise,
 			advisorConfigsPromise,
@@ -1648,6 +1662,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skipPythonPreflight: options.skipPythonPreflight,
 			contextFiles,
 			workspaceTree: resolvedWorkspaceTree,
+			repoMap: resolvedRepoMap,
 			get skills() {
 				return session?.skills ?? skills;
 			},
@@ -2395,6 +2410,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
 		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
+		const includeRepoMap = settings.get("includeRepoMap") ?? false;
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -2473,6 +2489,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				secretsEnabled,
 				workspaceTree: workspaceTreePromise,
 				includeWorkspaceTree,
+				repoMap: repoMapPromise,
+				includeRepoMap,
 				memoryRootEnabled: memoryBackend.id === "local",
 				model: getActiveModelString(),
 				includeModelInPrompt: settings.get("includeModelInPrompt"),

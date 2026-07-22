@@ -50,7 +50,7 @@ libc.workspace = true
 # Linux 专属：landlock crate 提供内核 Landlock LSM 绑定；ignore 用于
 # deny glob 的启动时展开（mount namespace 不能在运行时匹配 glob）。
 [target.'cfg(target_os = "linux")'.dependencies]
-landlock = "4"
+landlock = "0.4"
 ignore.workspace = true
 
 [dev-dependencies]

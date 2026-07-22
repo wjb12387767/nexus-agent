@@ -89,6 +89,7 @@ import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
+import { initLanguage } from "../i18n";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 import { buildCopyTargets } from "../utils/copy-targets";
 
@@ -440,6 +441,19 @@ export class SelectorController {
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
 				break;
+
+			// Language switching: update the i18n module's active language so
+			// `t()` / `trSetting()` / `trOption()` etc. resolve against the new
+			// catalog on the next render. Without this, settings.set("language")
+			// persists the choice but the UI keeps rendering the old language
+			// until restart. The settings panel's caches (cachedDefs,
+			// cachedSidebarWidth) are keyed by language and auto-invalidate.
+			case "language": {
+				const langSetting = value as "auto" | "en" | "zh";
+				initLanguage(langSetting);
+				this.ctx.ui.requestRender();
+				break;
+			}
 
 			// Settings with UI side effects
 			case "showImages":

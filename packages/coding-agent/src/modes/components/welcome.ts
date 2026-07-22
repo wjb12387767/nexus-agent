@@ -1,5 +1,6 @@
 import {
 	type Component,
+	matchesKey,
 	padding,
 	replaceTabs,
 	TERMINAL,
@@ -7,27 +8,8 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
-import tipsText from "./tips.txt" with { type: "text" };
-
-/** Tips embedded at build time, one per line; blanks dropped. */
-const TIPS: readonly string[] = tipsText
-	.split("\n")
-	.map(line => line.trim())
-	.filter(line => line.length > 0);
-
-/**
- * Fixed number of session rows in the welcome box so its height stays stable
- * across recent-session updates.
- */
-export const WELCOME_SESSION_SLOTS = 4;
-
-/**
- * Fixed number of LSP-server rows, for the same reason. Overflow is sliced so
- * the box height is constant regardless of how many servers a project has.
- */
-export const WELCOME_LSP_SLOTS = 4;
+import { getCurrentLanguage, getTips, type Language, t } from "../i18n";
 
 /** Trailing marker that flags a tip as a "what's new" callout. Stripped before
  *  wrapping (with any preceding whitespace) and replaced by {@link NEW_TAG_TEXT}
@@ -83,8 +65,13 @@ function renderNewTag(phase: number, encoding: ColorEncoding): string {
 	return out + reset;
 }
 export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): string[] {
-	const label = "Tip: ";
-	const labelWidth = visibleWidth(label);
+	// Localized "Tip:" label, padded to keep the body column aligned across
+	// re-renders after a `/language` switch (Chinese "提示：" is double-width
+	// but visibleWidth accounts for that).
+	const label = t("tip.label");
+	const labelPad = " ";
+	const labelFull = `${label}${labelPad}`;
+	const labelWidth = visibleWidth(labelFull);
 	const bodyBudget = boxWidth - 1 - labelWidth; // 1 = leading indent
 	if (bodyBudget < 8) return [];
 
@@ -98,7 +85,7 @@ export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): stri
 	// themes; the previous hardcoded `#b48cff` / `#9ccfff` pastels (plus a manual
 	// `\x1b[2m` dim on the body) dropped to ~1.5:1 contrast on a white background.
 	const continuationIndent = padding(labelWidth);
-	const styledLabel = theme.fg("customMessageLabel", label);
+	const styledLabel = theme.fg("customMessageLabel", labelFull);
 
 	const lines = wrappedBody.map((line, index) => {
 		const styledBody = theme.fg("muted", line);
@@ -135,33 +122,73 @@ export interface LspServerInfo {
 	fileTypes: string[];
 }
 
+/** Action identifiers for the welcome-screen buttons (see {@link WELCOME_BUTTONS}). */
+export type WelcomeButtonAction = "new" | "models" | "recent" | "settings" | "help";
+
+/** i18n message key for each button's localized label. */
+type ButtonLabelKey = "button.new" | "button.models" | "button.recent" | "button.settings" | "button.help";
+
+/** Button definitions rendered by {@link WelcomeComponent.#renderButtonRow}. The
+ *  `key` is the keyboard shortcut (digit 1-5), `labelKey` is the i18n key
+ *  resolved at render time (so the row re-renders with the new language on
+ *  the next frame after `/language` switches), and `action` is the value
+ *  passed to {@link WelcomeComponent.onButtonAction} when the button is
+ *  triggered. */
+const WELCOME_BUTTONS: ReadonlyArray<readonly [key: string, labelKey: ButtonLabelKey, action: WelcomeButtonAction]> = [
+	["1", "button.new", "new"],
+	["2", "button.models", "models"],
+	["3", "button.recent", "recent"],
+	["4", "button.settings", "settings"],
+	["5", "button.help", "help"],
+];
+
 /**
- * Premium welcome screen with block-based OMP logo and two-column layout.
+ * Welcome screen restyled to match MiMo-Code's centered home layout: a
+ * block-character NEXUS wordmark in brand orange, "Nexus Agent" tagline,
+ * model/provider info, and a row of action buttons with keyboard shortcuts
+ * 1-5. The legacy two-column bordered box was replaced with a flush,
+ * centered composition that mirrors MiMo-Code's visual identity.
  */
 export class WelcomeComponent implements Component {
 	#animStart: number | null = null;
 	#animTimer: Timer | null = null;
 	#selectedTip: string | undefined;
+	// Tips pool snapshot used to pick {@link #selectedTip}. Compared by
+	// reference so a language switch (which swaps the pool) triggers a
+	// re-roll without re-rolling on every render.
+	#tipPool: readonly string[] | undefined;
 	// Render cache: the welcome box is the first transcript-area component, so
 	// returning a stable array reference keeps the whole frame prefix stable.
 	// Bypassed while the intro animation runs (every frame differs).
 	#cachedWidth = -1;
 	#cachedLines: string[] | undefined;
+	// Language snapshot at the time the cache was populated. Compared on
+	// every render against the live i18n language so a `/language` switch
+	// busts the cache and re-renders in the new language on the next frame.
+	#cachedLang: Language | undefined;
+	/** Optional callback fired when a welcome button is triggered (keyboard 1-5
+	 *  via {@link handleInput} or external key listener). Host wires this to the
+	 *  matching slash command (`/new`, `/models`, `/resume`, `/settings`, `/help`). */
+	onButtonAction?: (action: WelcomeButtonAction) => void;
 
 	constructor(
+		// biome-ignore lint/correctness/noUnusedPrivateClassMembers: retained for future welcome-screen surfaces (recent sessions / LSP panels); setters are still called by InteractiveMode.
 		private readonly version: string,
 		private modelName: string,
 		private providerName: string,
+		// biome-ignore lint/correctness/noUnusedPrivateClassMembers: populated by setRecentSessions; render currently omits the list to match MiMo-Code's centered home layout.
 		private recentSessions: RecentSession[] = [],
+		// biome-ignore lint/correctness/noUnusedPrivateClassMembers: populated by setLspServers; render currently omits the list to match MiMo-Code's centered home layout.
 		private lspServers: LspServerInfo[] = [],
 	) {}
 	get tip(): string | undefined {
-		if (this.#selectedTip === undefined) {
-			if (theme.getSymbolPreset() === "unicode" && Math.random() < 0.1) {
-				this.#selectedTip = "Please use nerdfont 😭.";
-			} else {
-				this.#selectedTip = pickWeightedTip(TIPS, Math.random());
-			}
+		// Re-pick when the tip pool changes (language switch swaps the
+		// en/zh tips file). The pool identity is stable per language, so
+		// this only re-rolls on `/language` switches, not every render.
+		const pool = getTips();
+		if (this.#selectedTip === undefined || this.#tipPool !== pool) {
+			this.#tipPool = pool;
+			this.#selectedTip = pickWeightedTip(pool, Math.random());
 		}
 		return this.#selectedTip || undefined;
 	}
@@ -169,6 +196,7 @@ export class WelcomeComponent implements Component {
 	invalidate(): void {
 		this.#cachedWidth = -1;
 		this.#cachedLines = undefined;
+		this.#cachedLang = undefined;
 	}
 
 	/**
@@ -215,8 +243,34 @@ export class WelcomeComponent implements Component {
 		this.invalidate();
 	}
 
+	/**
+	 * Component interface: route digit keys 1-5 to the matching welcome
+	 * button's {@link onButtonAction} callback. Only fires when this
+	 * component holds focus; the host also wires a global key listener so
+	 * the buttons work from the editor (the usual resting focus) without
+	 * requiring the welcome box itself to be focused.
+	 */
+	handleInput(data: string): void {
+		if (matchesKey(data, "1")) this.onButtonAction?.("new");
+		else if (matchesKey(data, "2")) this.onButtonAction?.("models");
+		else if (matchesKey(data, "3")) this.onButtonAction?.("recent");
+		else if (matchesKey(data, "4")) this.onButtonAction?.("settings");
+		else if (matchesKey(data, "5")) this.onButtonAction?.("help");
+	}
+
 	render(termWidth: number): readonly string[] {
 		const animating = this.#animStart != null;
+		// Detect language changes since the last render so a `/language zh`
+		// mid-session invalidates the cached lines and the next frame picks
+		// up the new button labels, tip prefix, and tips pool. Without this
+		// the cache would serve the stale English (or Chinese) render until
+		// a width change or animation tick happens to bust it.
+		const lang = getCurrentLanguage();
+		if (lang !== this.#cachedLang) {
+			this.#cachedLang = lang;
+			this.#cachedLines = undefined;
+			this.#cachedWidth = -1;
+		}
 		if (!animating && this.#cachedLines && this.#cachedWidth === termWidth) {
 			return this.#cachedLines;
 		}
@@ -232,161 +286,95 @@ export class WelcomeComponent implements Component {
 	}
 
 	#renderLines(termWidth: number): string[] {
-		// Box dimensions - responsive with max width and small-terminal support
-		const maxWidth = 100;
-		const boxWidth = Math.min(maxWidth, Math.max(0, termWidth - 2));
-		if (boxWidth < 4) {
+		// MiMo-Code home layout, ported to the scrollback-area Component
+		// contract: the NEXUS wordmark sits at the horizontal center of the
+		// terminal (not a fixed 100-col cap, which left the block flush-left
+		// on wide terminals), with the "Nexus Agent" tagline right-aligned
+		// to the wordmark's top-right corner the way MiMo-Code places
+		// "Xiaomi" at the top-right of the MIMO+CODE block. Below: a muted
+		// model · provider line, then a single row of action buttons
+		// rendered without the bracketed "sticker" look that made the
+		// earlier version feel cheap.
+		const width = Math.max(0, termWidth);
+		if (width < 4) {
 			return [];
 		}
-		const dualContentWidth = boxWidth - 3; // 3 = │ + │ + │
-		const preferredLeftCol = 26;
-		const minLeftCol = 12; // logo width
-		const minRightCol = 20;
-		const leftMinContentWidth = Math.max(
-			minLeftCol,
-			visibleWidth("Welcome back!"),
-			visibleWidth(this.modelName),
-			visibleWidth(this.providerName),
-		);
-		const desiredLeftCol = Math.min(preferredLeftCol, Math.max(minLeftCol, Math.floor(dualContentWidth * 0.35)));
-		const dualLeftCol =
-			dualContentWidth >= minRightCol + 1
-				? Math.min(desiredLeftCol, dualContentWidth - minRightCol)
-				: Math.max(1, dualContentWidth - 1);
-		const dualRightCol = Math.max(1, dualContentWidth - dualLeftCol);
-		const showRightColumn = dualLeftCol >= leftMinContentWidth && dualRightCol >= minRightCol;
-		const leftCol = showRightColumn ? dualLeftCol : boxWidth - 2;
-		const rightCol = showRightColumn ? dualRightCol : 0;
-
-		// Logo: pick a frame from the intro animation if active, else the resting frame.
-		const logoColored = this.#currentLogoFrame();
-
-		// Left column - centered content
-		const leftLines = [
-			"",
-			this.#centerText(theme.bold("Welcome back!"), leftCol),
-			"",
-			...logoColored.map(l => this.#centerText(l, leftCol)),
-			"",
-			this.#centerText(theme.fg("muted", this.modelName), leftCol),
-			this.#centerText(theme.fg("borderMuted", this.providerName), leftCol),
-		];
-
-		// Right column separator
-		const separatorWidth = Math.max(0, rightCol - 2); // padding on each side
-		const separator = ` ${theme.fg("dim", theme.boxRound.horizontal.repeat(separatorWidth))}`;
-
-		// Recent sessions content
-		const sessionLines: string[] = [];
-		if (this.recentSessions.length === 0) {
-			sessionLines.push(` ${theme.fg("dim", "No recent sessions")}`);
-		} else {
-			// Reserve width for the bullet prefix (" • ") and the trailing " (timeAgo)"
-			// so the relative time is never the part that gets truncated. The name
-			// absorbs whatever space is left.
-			const bulletPrefix = ` ${theme.md.bullet} `;
-			const prefixWidth = visibleWidth(bulletPrefix);
-			for (const session of this.recentSessions.slice(0, WELCOME_SESSION_SLOTS)) {
-				const timeSuffixRaw = ` (${session.timeAgo})`;
-				const timeWidth = visibleWidth(timeSuffixRaw);
-				const nameBudget = Math.max(1, rightCol - prefixWidth - timeWidth);
-				const nameVis = visibleWidth(session.name);
-				const name = nameVis > nameBudget ? truncateToWidth(session.name, nameBudget) : session.name;
-				sessionLines.push(
-					`${theme.fg("dim", bulletPrefix)}${theme.fg("muted", name)}${theme.fg("dim", timeSuffixRaw)}`,
-				);
-			}
-		}
-		// Pad to the fixed slot count so the box height doesn't depend on session count.
-		while (sessionLines.length < WELCOME_SESSION_SLOTS) {
-			sessionLines.push("");
-		}
-
-		// LSP servers content
-		const lspLines: string[] = [];
-		if (this.lspServers.length === 0) {
-			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
-		} else {
-			for (const server of this.lspServers.slice(0, WELCOME_LSP_SLOTS)) {
-				const icon =
-					server.status === "ready"
-						? theme.styledSymbol("status.enabled", "success")
-						: server.status === "available"
-							? theme.styledSymbol("status.enabled", "dim")
-							: server.status === "connecting"
-								? theme.styledSymbol("status.pending", "muted")
-								: theme.styledSymbol("status.error", "error");
-				const exts = server.fileTypes.slice(0, 3).join(" ");
-				lspLines.push(` ${icon} ${theme.fg("muted", server.name)} ${theme.fg("dim", exts)}`);
-			}
-		}
-		// Pad to the fixed slot count so the box height doesn't depend on server count.
-		while (lspLines.length < WELCOME_LSP_SLOTS) {
-			lspLines.push("");
-		}
-
-		// Right column
-		const rightLines = [
-			` ${theme.bold(theme.fg("accent", "Tips"))}`,
-			` ${theme.fg("dim", "#")}${theme.fg("muted", " for prompt actions")}`,
-			` ${theme.fg("dim", "/")}${theme.fg("muted", " for commands")}`,
-			` ${theme.fg("dim", "!")}${theme.fg("muted", " to run bash")}`,
-			` ${theme.fg("dim", "$")}${theme.fg("muted", " to run python")}`,
-			separator,
-			` ${theme.bold(theme.fg("accent", "LSP Servers"))}`,
-			...lspLines,
-			separator,
-			` ${theme.bold(theme.fg("accent", "Recent sessions"))}`,
-			...sessionLines,
-			"",
-		];
-
-		// Border characters (dim)
-		const hChar = theme.boxRound.horizontal;
-		const h = theme.fg("dim", hChar);
-		const v = theme.fg("dim", theme.boxRound.vertical);
-		const tl = theme.fg("dim", theme.boxRound.topLeft);
-		const tr = theme.fg("dim", theme.boxRound.topRight);
-		const bl = theme.fg("dim", theme.boxRound.bottomLeft);
-		const br = theme.fg("dim", theme.boxRound.bottomRight);
 
 		const lines: string[] = [];
 
-		// Top border with embedded title
-		const title = ` ${APP_NAME} v${this.version} `;
-		const titlePrefixRaw = hChar.repeat(3);
-		const titleStyled = theme.fg("dim", titlePrefixRaw) + theme.fg("muted", title);
-		const titleVisLen = visibleWidth(titlePrefixRaw) + visibleWidth(title);
-		const titleSpace = boxWidth - 2;
-		if (titleVisLen >= titleSpace) {
-			lines.push(tl + truncateToWidth(titleStyled, titleSpace) + tr);
+		// Top breathing room. The transcript area cannot vertically center
+		// its contents (Component only knows its width, not the viewport
+		// height), so a fixed top margin is the closest approximation of
+		// MiMo-Code's flexGrow={1} spring. Five rows lifts the wordmark
+		// out of the upper-left corner without pushing the buttons off-screen
+		// on a 24-row terminal.
+		lines.push("", "", "", "", "");
+
+		// Logo frame (intro animation or resting).
+		const logoColored = this.#currentLogoFrame();
+		const logoWidth = logoColored.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+
+		// Tagline row: blank line with "Nexus Agent" right-aligned to the
+		// logo's right edge. MiMo-Code's logo data has its first row as
+		// blank space with "Xiaomi" at the right; NEXUS_LOGO's first row
+		// is the wordmark itself, so the tagline goes on a dedicated row
+		// above the logo to occupy the same visual corner.
+		const taglineColor = solidFg(NEXUS_GRAY_RGB, NEXUS_GRAY_256);
+		const reset = "\x1b[0m";
+		const tagline = `${taglineColor}Nexus Agent${reset}`;
+		const taglineWidth = visibleWidth(tagline);
+		const logoLeftPad = Math.floor((width - logoWidth) / 2);
+		if (logoLeftPad + logoWidth <= width && logoLeftPad + logoWidth - taglineWidth >= 0) {
+			const taglineLeft = logoLeftPad + logoWidth - taglineWidth;
+			lines.push(padding(taglineLeft) + tagline);
 		} else {
-			const afterTitle = titleSpace - titleVisLen;
-			lines.push(tl + titleStyled + theme.fg("dim", hChar.repeat(afterTitle)) + tr);
+			lines.push("");
 		}
 
-		// Content rows
-		const maxRows = showRightColumn ? Math.max(leftLines.length, rightLines.length) : leftLines.length;
-		for (let i = 0; i < maxRows; i++) {
-			const left = this.#fitToWidth(leftLines[i] ?? "", leftCol);
-			if (showRightColumn) {
-				const right = this.#fitToWidth(rightLines[i] ?? "", rightCol);
-				lines.push(v + left + v + right + v);
-			} else {
-				lines.push(v + left + v);
-			}
-		}
-		// Bottom border
-		if (showRightColumn) {
-			lines.push(bl + h.repeat(leftCol) + theme.fg("dim", theme.boxRound.teeUp) + h.repeat(rightCol) + br);
-		} else {
-			lines.push(bl + h.repeat(leftCol) + br);
+		// Logo rows, centered.
+		for (const line of logoColored) {
+			lines.push(this.#centerText(line, width));
 		}
 
-		// Randomly picked tip, rendered directly beneath the box.
-		lines.push(...this.#renderTip(boxWidth));
+		lines.push("");
+
+		// Model · provider, muted, centered. No "Welcome back!" header —
+		// MiMo-Code has no such headline, and the exclamation read as
+		// sticker-ish next to the wordmark.
+		const modelInfo = `${theme.fg("muted", this.modelName)} ${theme.fg("dim", "·")} ${theme.fg("borderMuted", this.providerName)}`;
+		lines.push(this.#centerText(modelInfo, width));
+
+		lines.push("");
+
+		// Action buttons row — centered, hidden when the terminal is too
+		// narrow to fit all five side-by-side.
+		const buttonRow = this.#renderButtonRow();
+		if (visibleWidth(buttonRow) <= width) {
+			lines.push(this.#centerText(buttonRow, width));
+		}
+
+		lines.push("");
+
+		// Randomly picked tip, rendered beneath the buttons.
+		lines.push(...this.#renderTip(width));
 
 		return lines;
+	}
+
+	/**
+	 * Build the action-button row: digit shortcuts in brand orange followed
+	 * by bold labels, separated by generous spacing. No bracket chrome —
+	 * the earlier `[1 New]` stickers read as emoji-ish pasted glyphs; the
+	 * bare `1 New  2 Models` form mirrors the quiet key hints MiMo-Code
+	 * uses for its prompt-area shortcuts.
+	 */
+	#renderButtonRow(): string {
+		const orange = solidFg(NEXUS_ORANGE_RGB, NEXUS_ORANGE_256);
+		const reset = "\x1b[0m";
+		const bold = "\x1b[1m";
+		return WELCOME_BUTTONS.map(([key, labelKey]) => `${orange}${key}${reset} ${bold}${t(labelKey)}${reset}`).join(
+			"    ",
+		);
 	}
 
 	/**
@@ -416,31 +404,6 @@ export class WelcomeComponent implements Component {
 		return padding(leftPad) + text + padding(rightPad);
 	}
 
-	/** Fit string to exact width with ANSI-aware truncation/padding */
-	#fitToWidth(str: string, width: number): string {
-		const visLen = visibleWidth(str);
-		if (visLen > width) {
-			const ellipsis = "…";
-			const ellipsisWidth = visibleWidth(ellipsis);
-			const maxWidth = Math.max(0, width - ellipsisWidth);
-			let truncated = "";
-			let currentWidth = 0;
-			let inEscape = false;
-			for (const char of str) {
-				if (char === "\x1b") inEscape = true;
-				if (inEscape) {
-					truncated += char;
-					if (char === "m") inEscape = false;
-				} else if (currentWidth < maxWidth) {
-					truncated += char;
-					currentWidth++;
-				}
-			}
-			return `${truncated}${ellipsis}`;
-		}
-		return str + padding(width - visLen);
-	}
-
 	/** Pick the logo frame for the current intro phase, or the resting frame. */
 	#currentLogoFrame(): readonly string[] {
 		if (this.#animStart == null) return REST_FRAME;
@@ -452,17 +415,56 @@ export class WelcomeComponent implements Component {
 
 export const PI_LOGO = ["▀██████████▀", " ╘██    ██  ", "  ██    ██  ", "  ██    ██  ", " ▄██▄  ▄██▄ "];
 
-/** Multi-stop palette for the diagonal gradient. */
-const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
-	[255, 92, 200], // hot pink
-	[200, 110, 255], // violet
-	[120, 130, 255], // periwinkle
-	[60, 200, 255], // bright cyan
-	[120, 255, 220], // mint
+/**
+ * NEXUS block-character logo, styled to match MiMo-Code's MIMO/CODE wordmark.
+ * 6 rows tall, 47 columns wide. Used by the restyled welcome screen so the
+ * branding reads as the agent's own name instead of the upstream "PI" glyph.
+ */
+export const NEXUS_LOGO: readonly string[] = [
+	"███╗   ██╗ ███████╗ ██╗  ██╗ ██╗   ██╗ ███████╗",
+	"████╗  ██║ ██╔════╝ ╚██╗██╔╝ ██║   ██║ ██╔════╝",
+	"██╔██╗ ██║ ███████╗  ╚████╔╝ ██║   ██║ ███████╗",
+	"██║╚██╗██║ ██╔═══╝    ╚██╔╝  ██║   ██║ ╚════██║",
+	"██║ ╚████║ ███████╗   ██╔╝   ╚██████╔╝ ███████║",
+	"╚═╝  ╚═══╝ ╚══════╝   ╚═╝     ╚═════╝  ╚══════╝",
 ];
 
-/** 256-color ramp fallback when truecolor isn't available. */
-const GRADIENT_RAMP_256 = [199, 171, 135, 99, 75, 51, 87];
+/**
+ * MiMo-Code brand orange (RGB 251, 129, 71), used for the NEXUS wordmark and
+ * the action-button accents so the welcome screen matches MiMo-Code's visual
+ * identity. The 256-color fallback is the nearest xterm cube slot.
+ */
+const NEXUS_ORANGE_RGB: readonly [number, number, number] = [251, 129, 71];
+const NEXUS_ORANGE_256 = 173;
+
+/** Gray used for the "Nexus Agent" tagline beneath the wordmark. */
+const NEXUS_GRAY_RGB: readonly [number, number, number] = [160, 160, 160];
+const NEXUS_GRAY_256 = 244;
+
+/** Resolve a truecolor or 256-color foreground escape for the given RGB. */
+function solidFg(rgb: readonly [number, number, number], fallback256: number): string {
+	if (TERMINAL.trueColor) {
+		return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
+	}
+	return `\x1b[38;5;${fallback256}m`;
+}
+
+/**
+ * Multi-stop palette for the diagonal gradient. Orange tones matching
+ * MiMo-Code's brand color (RGB 251, 129, 71); the diagonal lightens to
+ * near-white so the intro shine sweep reads as a highlight passing across
+ * the NEXUS wordmark rather than a rainbow.
+ */
+const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
+	[251, 129, 71], // MiMo-Code orange (base)
+	[255, 165, 100], // lighter orange
+	[255, 200, 150], // light orange
+	[255, 230, 200], // very light orange
+	[255, 250, 240], // near-white (peak for shine band)
+];
+
+/** 256-color ramp fallback when truecolor isn't available (orange ramp). */
+const GRADIENT_RAMP_256 = [166, 172, 178, 180, 217, 223, 231];
 
 /** Half-width of the shine highlight band, expressed in gradient-t units. */
 const SHINE_HALF_WIDTH = 0.18;
@@ -571,8 +573,8 @@ function introLogoFrame(progress: number): string[] {
 	const phase = ((((1 - eased) * INTRO_SWEEPS) % 1) + 1) % 1;
 	const shinePos = (((progress * INTRO_SHINE_TRAVERSALS) % 1) + 1) % 1;
 	const shineStrength = (1 - eased) ** 1.5;
-	return gradientLogo(PI_LOGO, phase, { strength: shineStrength, pos: shinePos });
+	return gradientLogo(NEXUS_LOGO, phase, { strength: shineStrength, pos: shinePos });
 }
 
 /** Resting gradient frame, cached for re-renders outside of the intro. */
-const REST_FRAME = gradientLogo(PI_LOGO, 0);
+const REST_FRAME = gradientLogo(NEXUS_LOGO, 0);

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/specification/main/schemas/mcp-server-config.json",
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--browser=chromium", "--isolated"],
+      "env": {}
+    },
+    "docling": {
+      "command": "uvx",
+      "args": ["--from=docling-mcp", "docling-mcp-server"],
+      "env": {
+        "DOCLING_FALLBACK_TO_LOCAL": "true"
+      }
+    },
+    "qdrant": {
+      "command": "uvx",
+      "args": ["mcp-server-qdrant"],
+      "env": {
+        "QDRANT_URL": "http://localhost:6333",
+        "QDRANT_COLLECTION_NAME": "nexus-knowledge",
+        "EMBEDDING_MODEL": "sentence-transformers/all-MiniLM-L6-v2"
+      }
+    },
+    "lightrag": {
+      "command": "python",
+      "args": ["<YOUR_HOME_DIR>/.nexus/externals/lightrag-mcp-bridge/server.py"],
+      "env": {
+        "LIGHTRAG_WORKING_DIR": "<YOUR_HOME_DIR>/.nexus/lightrag",
+        "LLM_API_BASE": "http://127.0.0.1:18317/v1",
+        "LLM_API_KEY": "<YOUR_API_KEY>",
+        "LLM_MODEL": "grok-4.5"
+      }
+    }
+  }
+}

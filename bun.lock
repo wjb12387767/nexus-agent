@@ -79,6 +79,7 @@
         "@babel/parser": "catalog:",
         "@mozilla/readability": "catalog:",
         "@nexus-agent/bash-ast": "workspace:*",
+        "@nexus-agent/checkpoint": "workspace:*",
         "@nexus-agent/grpc": "workspace:*",
         "@nexus-agent/routing": "workspace:*",
         "@oh-my-pi/hashline": "catalog:",

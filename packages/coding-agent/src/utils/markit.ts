@@ -156,11 +156,64 @@ async function runCachedBufferConversion(
 	return { ...finalized, cache: cacheEnabled ? "miss" : "skipped" };
 }
 
+// ── Docling 透明接管 ──
+// 如果设置了 DOCLING_SERVICE_URL 环境变量，优先通过 HTTP 调用 docling-serve
+// 进行文档转换（支持更精准的 PDF 布局分析、表格识别、OCR）。
+// 失败时安全回退到本地 markit（mupdf-wasm + mammoth）。
+const DOCLING_SERVICE_URL = process.env.DOCLING_SERVICE_URL;
+
+async function tryDoclingServe(
+	filePath: string,
+	signal?: AbortSignal,
+): Promise<MarkitConversionResult | null> {
+	if (!DOCLING_SERVICE_URL) return null;
+	try {
+		const { createReadStream } = await import("node:fs");
+		const stat = await import("node:fs/promises").then(m => m.stat(filePath));
+		const fileName = path.basename(filePath);
+
+		const formData = new FormData();
+		const fileBuffer = await import("node:fs/promises").then(m => m.readFile(filePath));
+		formData.append("files", new Blob([fileBuffer]), fileName);
+
+		const url = `${DOCLING_SERVICE_URL.replace(/\/$/, "")}/api/v1/convert/file`;
+		logger.debug("docling serve convert", { url, fileName, size: stat.size });
+
+		const response = await fetch(url, {
+			method: "POST",
+			body: formData,
+			signal,
+		});
+
+		if (!response.ok) {
+			logger.debug("docling serve http error", { status: response.status });
+			return null;
+		}
+
+		const data = await response.json() as { markdown?: string; document?: { md_content?: string } };
+		const markdown = data.markdown ?? data.document?.md_content ?? "";
+		if (markdown.length > 0) {
+			logger.debug("docling serve success", { length: markdown.length });
+			return { content: markdown, ok: true, cache: "skipped" };
+		}
+		return null;
+	} catch (error) {
+		logger.debug("docling serve fallback", { error: error instanceof Error ? error.message : String(error) });
+		return null;
+	}
+}
+
 export async function convertFileWithMarkit(
 	filePath: string,
 	signal?: AbortSignal,
 	options?: MarkitFileConversionOptions,
 ): Promise<MarkitConversionResult> {
+	// Docling 透明接管：优先尝试 docling-serve，失败回退到 markit
+	if (!options?.imageDir) {
+		const doclingResult = await tryDoclingServe(filePath, signal);
+		if (doclingResult) return doclingResult;
+	}
+
 	if (options?.imageDir) {
 		// Image extraction writes files into imageDir as a side effect; a
 		// markdown-only cache hit would leave the directory missing members, so

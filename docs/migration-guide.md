@@ -293,7 +293,7 @@ mv ~/.nexus ~/.omp
 
 ### 反馈迁移问题
 
-如果遇到迁移问题，请到 https://github.com/nexus-agent/nexus-agent/issues 提交 issue，附上：
+如果遇到迁移问题，请到 https://github.com/wjb12387767/nexus-agent/issues 提交 issue，附上：
 - omp 版本号
 - Nexus 版本号
 - 迁移步骤
