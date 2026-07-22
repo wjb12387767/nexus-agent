@@ -20,6 +20,10 @@
 # Consume as a base in another Dockerfile (see Dockerfile.robomp):
 #     ARG PI_BASE=nexus-agent/nexus:dev
 #     FROM ${PI_BASE} AS pi-base
+#
+# Published image (GHCR):
+#     docker pull ghcr.io/wjb12387767/nexus-agent:1.0.0-beta
+#     docker run --rm -it -v "$PWD":/work ghcr.io/wjb12387767/nexus-agent:1.0.0-beta cli
 ###############################################################################
 
 ARG BUN_VERSION=1.3.14
@@ -27,7 +31,7 @@ ARG BUN_VERSION=1.3.14
 ############################
 # 1) natives-builder — Rust + Bun → pi_natives.linux-<arch>.node
 ############################
-FROM rust:1.86-slim-bookworm AS natives-builder
+FROM rust:1.92-slim-bookworm AS natives-builder
 
 ARG BUN_VERSION
 ENV BUN_INSTALL=/opt/bun \

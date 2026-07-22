@@ -100,8 +100,30 @@ See [docs/mcp-config.md](./docs/mcp-config.md) for the full MCP configuration re
 
 ## Install
 
-> **Note:** Nexus Agent is currently source-only. There is no npm package or
-> prebuilt binary release yet. You need Bun ≥ 1.3.14 and Rust ≥ 1.92.0 (stable).
+> **Note:** Nexus Agent ships in three forms. Docker is the easiest — no
+> toolchain install required. Source build needs Bun ≥ 1.3.14 and Rust ≥ 1.92.0
+> (stable). There is no npm package or prebuilt standalone binary yet.
+
+### Option 0: Docker (recommended — no toolchain needed)
+
+Prebuilt multi-arch images (`linux/amd64` + `linux/arm64`) are published to
+GitHub Container Registry on every tag push.
+
+```sh
+# Pull the beta image
+docker pull ghcr.io/wjb12387767/nexus-agent:1.0.0-beta
+
+# Run the interactive TUI against the current directory
+docker run --rm -it -v "$PWD":/work ghcr.io/wjb12387767/nexus-agent:1.0.0-beta cli
+
+# Or start the full stack (agent + Qdrant + Docling + LightRAG) via compose
+docker compose up -d
+```
+
+The full-stack `docker-compose.yml` bundles all 4 MCP services (Qdrant, Docling,
+LightRAG; Playwright is opt-in). Copy `mcp.json.example` to
+`~/.nexus/agent/mcp.json`, fill in your API key, then `docker compose up -d`.
+See [docker-compose.yml](./docker-compose.yml) for the full service layout.
 
 ### Option 1: Install script (clones from GitHub, builds from source)
 
@@ -179,11 +201,12 @@ every file.
 This is a **source-available beta**, not a production-ready release. Be aware
 of the following limitations before using or contributing:
 
-- **No npm distribution:** There is no published npm package. Install requires
-  building from source (Bun + Rust toolchain).
-- **No prebuilt binaries:** The release workflow exists but GitHub Release
-  binaries are not yet available. The `nexus-v*` tag pattern is defined in
-  `release.yml` but no release has been published.
+- **No npm distribution:** There is no published npm package. Install via Docker
+  (recommended) or build from source (Bun + Rust toolchain).
+- **No standalone binary:** The agent runtime is TypeScript on Bun, not a
+  single Rust binary. The `release.yml` workflow builds `.node` NAPI addons
+  per-platform but does not bundle Bun + TS into a single executable. Use
+  Docker for a no-toolchain install.
 - **CI depends on self-hosted runner:** The CI matrix uses a self-hosted runner
   (`omp-kata`) inherited from the upstream project. Forks without this runner
   will see CI failures on `main` branch pushes. PR-triggered CI uses

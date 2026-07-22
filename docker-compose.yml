@@ -1,0 +1,150 @@
+# Nexus Agent — full stack (agent + 4 MCP services)
+#
+# Usage:
+#   1. Copy mcp.json.example to ~/.nexus/agent/mcp.json and fill in your API key
+#   2. docker compose up -d
+#   3. docker compose exec nexus cli    # interactive TUI
+#
+# The 4 MCP services (Qdrant / Docling / LightRAG) run as sibling containers;
+# Playwright is opt-in (see comments at the bottom of this file).
+
+services:
+  # ───────────────────────────────────────────────────────────────────────
+  # Nexus Agent — the coding agent runtime (TUI + tool layer)
+  # ───────────────────────────────────────────────────────────────────────
+  nexus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/wjb12387767/nexus-agent:${NEXUS_TAG:-1.0.0-beta}
+    container_name: nexus
+    # Interactive TUI needs a TTY; `-it` from `docker compose run` covers it,
+    # but `up` keeps the container alive on the gRPC port for non-TUI use.
+    stdin_open: true
+    tty: true
+    working_dir: /work
+    environment:
+      # Agent home: where ~/.nexus lives inside the container. Mount the host
+      # ~/.nexus here so credentials/config persist across rebuilds.
+      HOME: /home/nexus
+      # The 3 MCP servers that run as sibling containers are addressed via
+      # their service names instead of localhost.
+      QDRANT_URL: http://qdrant:6333
+      DOCLING_SERVICE_URL: http://docling:5001
+      LIGHTRAG_URL: http://lightrag:8000
+      # Forward the host's LLM relay (or any OpenAI-compatible endpoint).
+      # Override via .env or `LLM_API_BASE=...`.
+      LLM_API_BASE: ${LLM_API_BASE:-http://host.docker.internal:18317/v1}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY must be set in .env}
+      LLM_MODEL: ${LLM_MODEL:-grok-4.5}
+    volumes:
+      # Mount the user's project workspace into /work (the agent's CWD).
+      - ${WORKSPACE_DIR:-./workspace}:/work
+      # Persist ~/.nexus (credentials, sessions, mnemopi DB) across rebuilds.
+      - nexus-home:/home/nexus/.nexus
+    ports:
+      # gRPC server (for external clients like the VS Code extension).
+      - "50051:50051"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      docling:
+        condition: service_started
+      lightrag:
+        condition: service_started
+    networks:
+      - nexus-net
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Qdrant — production vector database (long-term knowledge storage)
+  # ───────────────────────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: nexus-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+    ports:
+      - "6333:6333"   # REST
+      - "6334:6334"   # gRPC
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6333/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - nexus-net
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Docling Serve — PDF/Word/PPT/Excel/EPUB → structured Markdown
+  # First run downloads ~1-2 GB of AI models, so expect a slow first start.
+  # ───────────────────────────────────────────────────────────────────────
+  docling:
+    image: ghcr.io/docling-project/docling-serve:latest
+    container_name: nexus-docling
+    restart: unless-stopped
+    environment:
+      DOCLING_SERVE_PORT: "5001"
+    ports:
+      - "5001:5001"
+    volumes:
+      # Cache models so subsequent starts are fast.
+      - docling-models:/root/.cache/huggingface
+    networks:
+      - nexus-net
+
+  # ───────────────────────────────────────────────────────────────────────
+  # LightRAG MCP bridge — knowledge-graph RAG with 5 retrieval modes.
+  #
+  # This is a thin Python MCP bridge that wraps the LightRAG engine.
+  # The bridge script lives in the host's ~/.nexus/externals/lightrag-mcp-bridge/
+  # and is mounted read-only into the container.
+  # ───────────────────────────────────────────────────────────────────────
+  lightrag:
+    image: python:3.12-slim-bookworm
+    container_name: nexus-lightrag
+    restart: unless-stopped
+    working_dir: /srv/lightrag
+    command: >
+      sh -c "pip install --quiet --no-cache-dir mcp lightrag-hku httpx &&
+             python /srv/lightrag/server.py"
+    environment:
+      LIGHTRAG_WORKING_DIR: /data/lightrag
+      LLM_API_BASE: ${LLM_API_BASE:-http://host.docker.internal:18317/v1}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY must be set in .env}
+      LLM_MODEL: ${LLM_MODEL:-grok-4.5}
+    volumes:
+      # Bridge script (mounted from host ~/.nexus/externals/lightrag-mcp-bridge/).
+      # If the path doesn't exist on the host, comment this service out and
+      # re-run `scripts/start-services.ps1` to scaffold it first.
+      - ${HOME}/.nexus/externals/lightrag-mcp-bridge:/srv/lightrag:ro
+      - lightrag-data:/data/lightrag
+    ports:
+      - "8000:8000"
+    networks:
+      - nexus-net
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Playwright MCP (OPT-IN) — browser automation via accessibility snapshots.
+  #
+  # Uncomment to enable. Requires the Playwright MCP server to be added to
+  # ~/.nexus/agent/mcp.json with `command: npx` (default in mcp.json.example).
+  # Running Playwright inside Docker requires the browser binaries; this image
+  # bundles them. The nexus container talks to it over the host network via
+  # `npx` — no sidecar container needed for stdio MCP transport.
+  #
+  # playwright:
+  #   image: mcr.microsoft.com/playwright:v1.49.0-jammy
+  #   container_name: nexus-playwright
+  #   network_mode: host
+  #   ...
+
+networks:
+  nexus-net:
+    driver: bridge
+
+volumes:
+  nexus-home:
+  qdrant-data:
+  docling-models:
+  lightrag-data:

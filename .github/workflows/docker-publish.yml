@@ -1,0 +1,122 @@
+# Nexus Agent — Docker image build & publish to GHCR
+#
+# Triggers:
+#   - push of `nexus-v*` tag  → publishes `:1.0.0-beta` + `:latest` (stable)
+#   - push to `main`           → publishes `:main` (rolling dev tag)
+#   - workflow_dispatch        → manual rebuild
+#
+# Output:
+#   ghcr.io/wjb12387767/nexus-agent:<version>
+#   ghcr.io/wjb12387767/nexus-agent:latest  (tag pushes only)
+#
+# Multi-arch: linux/amd64, linux/arm64
+# (arm64 cross-compiled via QEMU; native arm64 runners would be faster but
+#  cost money — fine for beta.)
+
+name: Docker Publish
+
+on:
+  push:
+    tags:
+      - "nexus-v*"
+    branches:
+      - main
+    paths:
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "packages/**"
+      - "crates/**"
+      - "python/**"
+      - ".github/workflows/docker-publish.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image tag (e.g. 1.0.0-beta). If empty, uses commit SHA."
+        required: false
+        type: string
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & push Docker image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (for arm64 cross-build)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tag strategy:
+          #   nexus-v1.0.0-beta  → 1.0.0-beta, latest
+          #   main branch        → main
+          #   manual dispatch    → <input> or sha-<short>
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/nexus-v') }}
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.version != '' }}
+            type=sha,prefix=sha-,enable=${{ github.event_name == 'workflow_dispatch' && inputs.version == '' }}
+          labels: |
+            org.opencontainers.image.title=Nexus Agent
+            org.opencontainers.image.description=Open-source AI coding agent — fusion of omp, Grok Build, and OpenClaude
+            org.opencontainers.image.source=https://github.com/wjb12387767/nexus-agent
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache between runs to speed up incremental builds.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Build arg passthrough.
+          build-args: |
+            BUN_VERSION=1.3.14
+
+      - name: Summary
+        run: |
+          echo "### Docker image published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Image: \`ghcr.io/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Tags:  \`${{ steps.meta.outputs.tags }\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Pull with:" >> $GITHUB_STEP_SUMMARY
+          echo '```sh' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ghcr.io/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

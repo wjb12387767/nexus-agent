@@ -66,3 +66,26 @@ pi-*.html
 
 # Secrets. Should never be in the image regardless.
 .env
+.env.*
+!.env.example
+
+# Host agent home — contains user credentials, sessions, and mnemopi DB.
+# (docker-compose.yml mounts this as a volume at runtime instead.)
+.omp/
+.nexus/agent/
+.nexus/externals/
+
+# Sponsor QR codes — not needed inside the runtime image.
+assets/sponsor-qr.jpg
+
+# Session-stats output (aggregated charts, not source).
+scripts/session-stats/out/
+
+# Trae / Cursor IDE working dirs (host-side).
+.trae/
+.cursor/
+
+# Windows shell noise.
+Thumbs.db
+desktop.ini
+ehthumbs.db
