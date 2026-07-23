@@ -1,0 +1,293 @@
+name: Build WorkAny Desktop
+
+# Builds the WorkAny desktop app (Tauri + React) with the nexus CLI bundled.
+# Produces platform installers (.dmg / .msi / .exe / .deb / .rpm) and
+# uploads them to a GitHub Release.
+#
+# Triggers:
+#   - Push tag `workany-v*` (auto release)
+#   - Manual dispatch (dry-run or release)
+
+on:
+  push:
+    tags:
+      - "workany-v*"
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Platform to build"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - linux
+          - windows
+          - macos-arm64
+          - macos-intel
+      release:
+        description: "Create a release after build"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  build:
+    name: "Build WorkAny: ${{ matrix.platform }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            bun_api_target: bun-linux-x64
+            nexus_cross_target: linux-x64
+            name: linux-x86_64
+
+          - platform: windows
+            os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            bun_api_target: bun-windows-x64
+            nexus_cross_target: win32-x64
+            name: windows-x86_64
+
+          - platform: macos-arm64
+            os: macos-latest
+            rust_target: aarch64-apple-darwin
+            bun_api_target: bun-darwin-arm64
+            nexus_cross_target: darwin-arm64
+            name: macos-arm64
+
+          - platform: macos-intel
+            os: macos-latest
+            rust_target: x86_64-apple-darwin
+            bun_api_target: bun-darwin-x64
+            nexus_cross_target: darwin-x64
+            name: macos-intel
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check platform filter
+        id: check
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.platform }}" != "all" && "${{ github.event.inputs.platform }}" != "${{ matrix.platform }}" ]]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout repository
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: steps.check.outputs.skip != 'true' && matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2 file
+          echo "APPIMAGE_EXTRACT_AND_RUN=1" >> $GITHUB_ENV
+
+      - name: Setup Node.js
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup pnpm
+        if: steps.check.outputs.skip != 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Bun
+        if: steps.check.outputs.skip != 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+
+      - name: Setup Rust
+        if: steps.check.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Setup Rust cache
+        if: steps.check.outputs.skip != 'true'
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./target
+            ./workany-dev/workany-dev/src-tauri -> target
+          shared-key: workany-${{ matrix.name }}
+
+      # Step 1: Build nexus CLI binary (root workspace)
+      - name: Build nexus CLI
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        run: |
+          bun install --frozen-lockfile
+          bun --cwd=packages/coding-agent run build
+          # Verify the binary was produced
+          ls -la packages/coding-agent/dist/
+
+      # Step 2: Build workany-api sidecar
+      - name: Build workany-api sidecar (Unix)
+        if: steps.check.outputs.skip != 'true' && matrix.platform != 'windows'
+        shell: bash
+        run: |
+          cd workany-dev/workany-dev/src-api
+          mkdir -p dist
+          bun build src/index.ts --compile --target=${{ matrix.bun_api_target }} --outfile dist/workany-api-${{ matrix.rust_target }}
+
+      - name: Build workany-api sidecar (Windows)
+        if: steps.check.outputs.skip != 'true' && matrix.platform == 'windows'
+        shell: bash
+        run: |
+          cd workany-dev/workany-dev/src-api
+          mkdir -p dist
+          bun build src/index.ts --compile --target=${{ matrix.bun_api_target }} --outfile dist/workany-api-${{ matrix.rust_target }}.exe
+
+      # Step 3: Copy nexus CLI into sidecar directory
+      - name: Copy nexus CLI into sidecar directory
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        run: |
+          NEXUS_SRC="packages/coding-agent/dist/nexus"
+          NEXUS_DST="workany-dev/workany-dev/src-api/dist/nexus-${{ matrix.rust_target }}"
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            NEXUS_DST="${NEXUS_DST}.exe"
+          fi
+          cp "$NEXUS_SRC" "$NEXUS_DST"
+          chmod +x "$NEXUS_DST" 2>/dev/null || true
+          echo "Copied nexus CLI to $NEXUS_DST"
+
+      # Step 4: Install frontend dependencies
+      - name: Install frontend dependencies
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cd workany-dev/workany-dev
+          pnpm install
+
+      # Step 5: Build frontend
+      - name: Build frontend
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cd workany-dev/workany-dev
+          pnpm build
+
+      # Step 6: Build Tauri app
+      - name: Build Tauri app (Linux)
+        if: steps.check.outputs.skip != 'true' && matrix.platform == 'linux'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: workany-dev/workany-dev
+          tauriScript: pnpm tauri
+          args: --target ${{ matrix.rust_target }} --bundles deb,rpm
+
+      - name: Build Tauri app (Windows/macOS)
+        if: steps.check.outputs.skip != 'true' && matrix.platform != 'linux'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: workany-dev/workany-dev
+          tauriScript: pnpm tauri
+          args: --target ${{ matrix.rust_target }}
+
+      # Step 7: Upload artifacts
+      - name: Upload artifacts (Linux)
+        if: steps.check.outputs.skip != 'true' && matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkAny-${{ matrix.name }}
+          path: |
+            workany-dev/workany-dev/src-tauri/target/${{ matrix.rust_target }}/release/bundle/deb/*.deb
+            workany-dev/workany-dev/src-tauri/target/${{ matrix.rust_target }}/release/bundle/rpm/*.rpm
+          if-no-files-found: ignore
+
+      - name: Upload artifacts (Windows)
+        if: steps.check.outputs.skip != 'true' && matrix.platform == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkAny-${{ matrix.name }}
+          path: |
+            workany-dev/workany-dev/src-tauri/target/${{ matrix.rust_target }}/release/bundle/msi/*.msi
+            workany-dev/workany-dev/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*.exe
+          if-no-files-found: ignore
+
+      - name: Upload artifacts (macOS)
+        if: steps.check.outputs.skip != 'true' && startsWith(matrix.platform, 'macos')
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkAny-${{ matrix.name }}
+          path: |
+            workany-dev/workany-dev/src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg
+            workany-dev/workany-dev/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/*.app
+          if-no-files-found: ignore
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/workany-v') || github.event.inputs.release == 'true'
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: find artifacts -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.msi" -o -name "*.exe" -o -name "*.dmg" \) | head -20
+
+      - name: Get version from tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#workany-v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=workany-v${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Flatten artifacts for release
+        run: |
+          mkdir -p release-files
+          find artifacts -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.msi" -o -name "*.exe" -o -name "*.dmg" \) -exec cp {} release-files/ \;
+          ls -la release-files/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: ${{ github.event.inputs.release != 'true' && !startsWith(github.ref, 'refs/tags/workany-v') }}
+          generate_release_notes: true
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: WorkAny Desktop v${{ steps.version.outputs.version }}
+          files: release-files/*
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
