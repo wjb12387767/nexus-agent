@@ -21,9 +21,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-Nexus Agent is a fork of Oh My Pi (omp) by Can Bölük, which is itself a fork
-of Pi by Mario Zechner. See THIRD-PARTY-NOTICES.md for the full attribution
-chain, including code ported from Grok Build (Apache-2.0) and OpenClaude (MIT).
