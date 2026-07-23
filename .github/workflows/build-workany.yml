@@ -144,7 +144,14 @@ jobs:
           bun --cwd=packages/coding-agent run build
           ls -la packages/coding-agent/dist/
 
-      # Step 3: Build workany-api sidecar
+      # Step 3: Install workany-dev deps + build workany-api sidecar
+      - name: Install workany-dev dependencies
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        run: |
+          cd workany-dev/workany-dev
+          pnpm install --frozen-lockfile
+
       - name: Build workany-api sidecar (Unix)
         if: steps.check.outputs.skip != 'true' && matrix.platform != 'windows'
         shell: bash
@@ -166,30 +173,30 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         shell: bash
         run: |
-          NEXUS_SRC="packages/coding-agent/dist/nexus"
-          NEXUS_DST="workany-dev/workany-dev/src-api/dist/nexus-${{ matrix.rust_target }}"
           if [ "${{ matrix.platform }}" = "windows" ]; then
-            NEXUS_DST="${NEXUS_DST}.exe"
+            NEXUS_SRC="packages/coding-agent/dist/nexus.exe"
+            NEXUS_DST="workany-dev/workany-dev/src-api/dist/nexus-${{ matrix.rust_target }}.exe"
+          else
+            NEXUS_SRC="packages/coding-agent/dist/nexus"
+            NEXUS_DST="workany-dev/workany-dev/src-api/dist/nexus-${{ matrix.rust_target }}"
+          fi
+          if [ ! -f "$NEXUS_SRC" ]; then
+            echo "ERROR: nexus binary not found at $NEXUS_SRC"
+            ls -la packages/coding-agent/dist/
+            exit 1
           fi
           cp "$NEXUS_SRC" "$NEXUS_DST"
           chmod +x "$NEXUS_DST" 2>/dev/null || true
           echo "Copied nexus CLI to $NEXUS_DST"
 
-      # Step 5: Install frontend dependencies
-      - name: Install frontend dependencies
-        if: steps.check.outputs.skip != 'true'
-        run: |
-          cd workany-dev/workany-dev
-          pnpm install
-
-      # Step 6: Build frontend
+      # Step 5: Build frontend (deps already installed in Step 3)
       - name: Build frontend
         if: steps.check.outputs.skip != 'true'
         run: |
           cd workany-dev/workany-dev
           pnpm build
 
-      # Step 7: Build Tauri app
+      # Step 6: Build Tauri app
       - name: Build Tauri app (Linux)
         if: steps.check.outputs.skip != 'true' && matrix.platform == 'linux'
         uses: tauri-apps/tauri-action@v0
@@ -216,7 +223,7 @@ jobs:
           tauriScript: pnpm tauri
           args: --target ${{ matrix.rust_target }}
 
-      # Step 8: Upload artifacts
+      # Step 7: Upload artifacts
       - name: Upload artifacts (Linux)
         if: steps.check.outputs.skip != 'true' && matrix.platform == 'linux'
         uses: actions/upload-artifact@v4
