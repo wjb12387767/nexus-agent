@@ -295,6 +295,18 @@ export class NexusAgent extends BaseAgent {
       }
     }
 
+    // Pass custom base URL via environment variables.
+    // nexus CLI supports ANTHROPIC_BASE_URL natively; OPENAI_BASE_URL is
+    // respected by most OpenAI-compatible providers. This replaces the
+    // removed --api-base CLI flag.
+    if (this.config.baseUrl) {
+      if (this.config.apiType === 'openai-completions') {
+        env.OPENAI_BASE_URL = this.config.baseUrl;
+      } else {
+        env.ANTHROPIC_BASE_URL = this.config.baseUrl;
+      }
+    }
+
     // Pass nexus settings via environment variables for options that
     // may not have dedicated CLI flags. The nexus CLI reads these if
     // supported; unknown variables are safely ignored.
@@ -383,9 +395,9 @@ export class NexusAgent extends BaseAgent {
       args.push('--checkpoint');
     }
 
-    if (this.config.baseUrl) {
-      args.push('--api-base', this.config.baseUrl);
-    }
+    // NOTE: --api-base flag was removed because nexus CLI does not support it.
+    // Base URL is passed via environment variables (ANTHROPIC_BASE_URL / OPENAI_BASE_URL)
+    // in buildEnv(). Unknown CLI flags cause hard errors in nexus.
 
     // Positional prompt (must be last)
     args.push(prompt);
