@@ -1,0 +1,144 @@
+import { serve } from '@hono/node-server';
+import type { ServerType } from '@hono/node-server';
+import { Hono } from 'hono';
+import { logger } from 'hono/logger';
+
+import {
+  agentRoutes,
+  filesRoutes,
+  healthRoutes,
+  historyRoutes,
+  mcpRoutes,
+  previewRoutes,
+  providersRoutes,
+  sandboxRoutes,
+} from '@/app/api';
+import { corsMiddleware } from '@/app/middleware/index.js';
+import { loadConfig } from '@/config/loader.js';
+import {
+  initProviderManager,
+  shutdownProviderManager,
+} from '@/shared/provider/manager';
+import { getPreviewManager } from '@/shared/services/preview';
+import { closeAllAcpRuntimes } from '@/shared/services/acp';
+
+const app = new Hono();
+
+// Global middleware
+app.use('*', logger());
+app.use('*', corsMiddleware);
+
+// Routes
+app.route('/health', healthRoutes);
+app.route('/agent', agentRoutes);
+app.route('/sandbox', sandboxRoutes);
+app.route('/preview', previewRoutes);
+app.route('/providers', providersRoutes);
+app.route('/files', filesRoutes);
+app.route('/mcp', mcpRoutes);
+app.route('/history', historyRoutes);
+
+// Root endpoint
+app.get('/', (c) => {
+  return c.json({
+    name: 'WorkAny API',
+    version: '0.1.1',
+    endpoints: {
+      health: '/health',
+      agent: '/agent',
+      sandbox: '/sandbox',
+      preview: '/preview',
+      providers: '/providers',
+      files: '/files',
+      mcp: '/mcp',
+      history: '/history',
+    },
+  });
+});
+
+// 404 handler
+app.notFound((c) => {
+  return c.json({ error: 'Not Found' }, 404);
+});
+
+// Error handler
+app.onError((err, c) => {
+  console.error('Server error:', err);
+  return c.json({ error: 'Internal Server Error' }, 500);
+});
+
+// Default port: 2026 for development, 2620 for production (set via Tauri sidecar env)
+const port = Number(process.env.PORT) || 2026;
+
+// Store server instance for hot reload cleanup
+let server: ServerType | null = null;
+let cleanupPromise: Promise<void> | null = null;
+
+// Cleanup function
+const cleanup = () => {
+  if (cleanupPromise) return cleanupPromise;
+  cleanupPromise = (async () => {
+  // ACP agents are long-lived child processes. They must be stopped before a
+  // dev-server restart or the old process keeps the watcher from relaunching.
+  closeAllAcpRuntimes();
+
+  // Stop all preview servers
+  try {
+    const previewManager = getPreviewManager();
+    await previewManager.stopAll();
+  } catch (error) {
+    console.error('Error stopping preview servers:', error);
+  }
+
+  // Shutdown provider manager
+  try {
+    await shutdownProviderManager();
+  } catch (error) {
+    console.error('Error shutting down provider manager:', error);
+  }
+
+  if (server) {
+    const activeServer = server;
+    server = null;
+    await new Promise<void>((resolve) => activeServer.close(() => resolve()));
+  }
+  })();
+  return cleanupPromise;
+};
+
+// Handle hot reload - close existing server
+const shutdown = () => {
+  void cleanup().finally(() => process.exit(0));
+};
+process.once('SIGTERM', shutdown);
+process.once('SIGINT', shutdown);
+
+// Initialize and start server
+async function start() {
+  console.log(`🚀 WorkAny API starting...`);
+
+  // Load configuration
+  await loadConfig();
+
+  // Install built-in skills to ~/.workany/skills/
+  const { installBuiltinSkills } = await import('@/shared/skills/loader');
+  await installBuiltinSkills();
+
+  // Initialize provider manager
+  await initProviderManager();
+
+  console.log(`🚀 Server starting on http://localhost:${port}`);
+
+  server = serve({
+    fetch: app.fetch,
+    port,
+  });
+}
+
+start().catch((error) => {
+  console.error('Failed to start server:', error);
+  process.exit(1);
+});
+
+// Note: Don't export default app here, as Bun will try to auto-start it with Bun.serve()
+// which conflicts with our @hono/node-server serve() call
