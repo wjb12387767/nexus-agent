@@ -12,6 +12,12 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import {
+	type CuratorConfig,
+	DEFAULT_CURATOR_CONFIG,
+	runCuratorReview,
+	shouldRunNow,
+} from "../curator";
 import autolearnGuidance from "../prompts/system/autolearn-guidance.md" with { type: "text" };
 import autolearnGuidanceLearn from "../prompts/system/autolearn-guidance-learn.md" with { type: "text" };
 import autolearnNudgeAutoContinue from "../prompts/system/autolearn-nudge-autocontinue.md" with { type: "text" };
@@ -108,6 +114,9 @@ export class AutoLearnController {
 				break;
 			}
 		}
+		// A2 Curator: independent of autolearn — runs on its own 7d cycle when
+		// enabled. Fire-and-forget; failures never affect the primary loop.
+		this.#maybeRunCurator();
 		// Honor a live opt-out: the subscription outlives the setting, so re-check
 		// the current flag rather than trusting install-time state.
 		if (!this.#settings.get("autolearn.enabled")) return;
@@ -134,6 +143,54 @@ export class AutoLearnController {
 			return;
 		}
 		this.#startCapture();
+	}
+
+	/**
+	 * A2 Curator 集成入口：读取 curator 设置，调用 shouldRunNow，true 时
+	 * fire-and-forget 调用 runCuratorReview。失败静默吞掉。
+	 *
+	 * 与 autolearn 主流程独立：curator 不需要 capture 完成，也不阻塞下一轮。
+	 */
+	#maybeRunCurator(): void {
+		try {
+			if (!this.#settings.get("curator.enabled")) return;
+			const config: CuratorConfig = {
+				...DEFAULT_CURATOR_CONFIG,
+				enabled: true,
+				intervalHours: this.#settings.get("curator.intervalHours") ?? DEFAULT_CURATOR_CONFIG.intervalHours,
+				staleAfterDays: this.#settings.get("curator.staleAfterDays") ?? DEFAULT_CURATOR_CONFIG.staleAfterDays,
+				archiveAfterDays: this.#settings.get("curator.archiveAfterDays") ?? DEFAULT_CURATOR_CONFIG.archiveAfterDays,
+			};
+			// shouldRunNow 会在 last_run_at 为 null 时就地 seed state；这里通过
+			// runCuratorReview 内部加载并 seed，故先用一个临时 state 探测是否需要运行。
+			// 真正的 state 加载/seed/run 都在 runCuratorReview 内完成。
+			void (async () => {
+				try {
+					// 加载 state（与 runCuratorReview 共享路径）以决定是否运行
+					const { loadCuratorState, defaultCuratorStatePath } = await import("../curator");
+					const statePath = config.statePath ?? defaultCuratorStatePath();
+					const state = await loadCuratorState(statePath);
+					const now = new Date();
+					if (!shouldRunNow(state, config, now)) {
+						// 首次 seed 后需要持久化（shouldRunNow 已就地修改 state）
+						const { saveCuratorState } = await import("../curator");
+						await saveCuratorState(statePath, state).catch(err => {
+							logger.debug("curator state save (seed) failed", { err: err instanceof Error ? err.message : String(err) });
+						});
+						return;
+					}
+					await runCuratorReview(config, {
+						onSummary: summary => {
+							logger.debug("curator review summary", { summary });
+						},
+					});
+				} catch (err) {
+					logger.debug("curator review failed", { err: err instanceof Error ? err.message : String(err) });
+				}
+			})();
+		} catch (err) {
+			logger.debug("curator setup failed", { err: err instanceof Error ? err.message : String(err) });
+		}
 	}
 
 	#startCapture(): void {

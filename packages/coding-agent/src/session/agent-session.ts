@@ -24,6 +24,8 @@ import { Patch } from "@oh-my-pi/hashline";
 import {
 	type AfterToolCallContext,
 	type AfterToolCallResult,
+	type BeforeToolCallContext,
+	type BeforeToolCallResult,
 	Agent,
 	AgentBusyError,
 	type AgentEvent,
@@ -171,6 +173,12 @@ import {
 } from "../advisor";
 import { type AsyncJob, type AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import { classifyDifficulty } from "../auto-thinking/classifier";
+import {
+	type BackgroundReviewAgent,
+	type BackgroundReviewConfig,
+	DEFAULT_BACKGROUND_REVIEW_CONFIG,
+	spawnBackgroundReview,
+} from "../background-review";
 import { reset as resetCapabilities } from "../capability";
 import type { Rule } from "../capability/rule";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
@@ -322,6 +330,7 @@ import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
+import { getReadBlockError, getWriteDeniedError } from "../tools/file-safety";
 import { isInternalUrlPath, normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import {
 	buildResolveReminderMessage,
@@ -2760,6 +2769,10 @@ export class AgentSession {
 				}
 			}
 			await this.#maintainContextMidRun(messages, signal, context);
+			// A1 Background Review: fire-and-forget after every turn end. The
+			// review is async, delayed 100ms, and silently catches all errors so
+			// nothing it does can affect the primary agent loop.
+			this.#maybeSpawnBackgroundReview(messages);
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
@@ -2823,6 +2836,8 @@ export class AgentSession {
 		});
 		// Tool-result hook owns synchronous post-tool actions that must affect the current loop.
 		this.agent.afterToolCall = ctx => this.#afterToolCall(ctx);
+		// Pre-execution hook owns credential-path / .env file safety guard.
+		this.agent.beforeToolCall = ctx => this.#beforeToolCall(ctx);
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
 		this.#syncTodoPhasesFromBranch();
@@ -5370,6 +5385,50 @@ export class AgentSession {
 		}
 	}
 
+	#beforeToolCall(ctx: BeforeToolCallContext): BeforeToolCallResult | undefined {
+		// 文件安全护栏：在工具执行前拦截凭证路径写入与 .env 文件读取。
+		// 这是 defense-in-depth，不是安全边界；bash 工具仍可绕过。
+		// 永不抛异常——任何内部错误都放行，不阻断正常工作流。
+		try {
+			if (this.settings.get("fileSafety.enabled") !== true) return undefined;
+			const blockEnvFiles = this.settings.get("fileSafety.blockEnvFiles") !== false;
+			const customDeniedPaths = (this.settings.get("fileSafety.customDeniedPaths") as string[]) ?? [];
+			const name = ctx.toolCall.name;
+			const args = ctx.args ?? {};
+
+			// 写入类工具：检查凭证路径
+			if (name === "write" || name === "edit" || name === "ast_edit") {
+				const target =
+					typeof args.path === "string"
+						? args.path
+						: typeof args.file_path === "string"
+							? args.file_path
+							: undefined;
+				if (typeof target === "string") {
+					const err = getWriteDeniedError(target, "Write", customDeniedPaths);
+					if (err) return { block: true, reason: err };
+				}
+			}
+
+			// 读取类工具：检查 .env 文件
+			if (name === "read") {
+				const target =
+					typeof args.file_path === "string"
+						? args.file_path
+						: typeof args.path === "string"
+							? args.path
+							: undefined;
+				if (typeof target === "string") {
+					const err = getReadBlockError(target, blockEnvFiles);
+					if (err) return { block: true, reason: err };
+				}
+			}
+		} catch {
+			// 防御性兜底：guard 永不阻断正常工作流
+		}
+		return undefined;
+	}
+
 	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
 		if (
 			this.#isTerminalYieldToolResult({
@@ -6650,6 +6709,40 @@ export class AgentSession {
 			await withTimeout(task, 3_000, "Timed out draining auto-learn capture during dispose");
 		} catch (error) {
 			logger.warn("Auto-learn capture did not settle during dispose", { error: String(error) });
+		}
+	}
+
+	/**
+	 * A1 Background Review 集成入口：读取设置，构造配置与 agent 接口，
+	 * fire-and-forget 启动 review。review 失败静默吞掉，绝不影响主循环。
+	 *
+	 * 实际的 review turn 由 {@link BackgroundReviewAgent.spawnReviewTurn} 启动；
+	 * 集成层（如 sdk.ts）可通过设置该字段注入真正的子 agent 运行器。
+	 * 字段为空时本方法仅完成消息构造并静默返回。
+	 */
+	#maybeSpawnBackgroundReview(messages: AgentMessage[]): void {
+		try {
+			if (!this.settings.get("backgroundReview.enabled")) return;
+			const config: BackgroundReviewConfig = {
+				enabled: true,
+				notificationMode: this.settings.get("backgroundReview.notificationMode") ?? "on",
+				auxModel: this.settings.get("backgroundReview.auxModel") ?? undefined,
+				maxIterations: DEFAULT_BACKGROUND_REVIEW_CONFIG.maxIterations,
+				digestTail: DEFAULT_BACKGROUND_REVIEW_CONFIG.digestTail,
+			};
+			const agent: BackgroundReviewAgent = {
+				messages,
+				sessionId: this.sessionId,
+				get parentSessionId() {
+					return undefined;
+				},
+				notify: (level, message) => {
+					this.emitNotice(level, message, "background-review");
+				},
+			};
+			spawnBackgroundReview(agent, messages, config);
+		} catch (err) {
+			logger.debug("background review spawn failed", { err: err instanceof Error ? err.message : String(err) });
 		}
 	}
 

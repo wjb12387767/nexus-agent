@@ -7,9 +7,17 @@ import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
+import {
+	type CuratorConfig,
+	DEFAULT_CURATOR_CONFIG,
+	defaultCuratorStatePath,
+	loadCuratorState,
+	runCuratorReview,
+	saveCuratorState,
+} from "../curator";
 import { expandRoleAlias, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
-import type { SettingPath, SettingValue } from "../config/settings";
+import type { Settings, SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import {
 	clearPluginRootsAndCaches,
@@ -47,7 +55,7 @@ import {
 } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
-import { buildContextReportText } from "./helpers/context-report";
+import { buildContextReportText, buildContextReportTextWithBreakdown } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
 import { createMarketplaceManager } from "./helpers/marketplace-manager";
 import { handleMcpAcp } from "./helpers/mcp";
@@ -55,6 +63,7 @@ import { commandConsumed, errorMessage, parseSlashCommand, parseSubcommand, usag
 import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } from "./helpers/reset-usage";
 import { handleSshAcp } from "./helpers/ssh";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
+import { buildSkillsGraphText } from "./helpers/skills-graph-report";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
@@ -203,6 +212,78 @@ function parseShakeMode(args: string): ShakeMode | { error: string } {
 	if (verb === "" || verb === "elide") return "elide";
 	if (verb === "images") return "images";
 	return { error: `Unknown /shake mode "${verb}". Use elide or images.` };
+}
+
+/**
+ * 从 settings 构建 curator 配置（回退到默认值）。
+ */
+function buildCuratorConfigFromSettings(s: Settings): CuratorConfig {
+	return {
+		...DEFAULT_CURATOR_CONFIG,
+		enabled: s.get("curator.enabled" as SettingPath) === true,
+		intervalHours:
+			(s.get("curator.intervalHours" as SettingPath) as number | undefined) ?? DEFAULT_CURATOR_CONFIG.intervalHours,
+		staleAfterDays:
+			(s.get("curator.staleAfterDays" as SettingPath) as number | undefined) ??
+			DEFAULT_CURATOR_CONFIG.staleAfterDays,
+		archiveAfterDays:
+			(s.get("curator.archiveAfterDays" as SettingPath) as number | undefined) ??
+			DEFAULT_CURATOR_CONFIG.archiveAfterDays,
+	};
+}
+
+/**
+ * 处理 /curator 命令，返回状态文本。
+ *
+ *  - status（默认）：显示 enabled/paused/last_run/summary
+ *  - run：手动触发一次 curator review（忽略 shouldRunNow 间隔检查）
+ *  - pause：暂停自动运行
+ *  - resume：恢复自动运行
+ */
+async function handleCuratorCommand(args: string, s: Settings): Promise<string> {
+	const { verb } = parseSubcommand(args);
+	const config = buildCuratorConfigFromSettings(s);
+	const statePath = defaultCuratorStatePath();
+	const state = await loadCuratorState(statePath);
+
+	if (verb === "pause") {
+		if (state.paused) return "Curator is already paused.";
+		state.paused = true;
+		await saveCuratorState(statePath, state);
+		return "Curator paused. Automatic runs are suspended; use /curator resume to re-enable.";
+	}
+	if (verb === "resume") {
+		if (!state.paused) return "Curator is not paused.";
+		state.paused = false;
+		await saveCuratorState(statePath, state);
+		return "Curator resumed. Automatic runs will fire on the next interval.";
+	}
+	if (verb === "run") {
+		const runConfig = { ...config, enabled: true };
+		let summary = "Curator review completed.";
+		try {
+			await runCuratorReview(runConfig, {
+				onSummary: text => {
+					summary = text;
+				},
+			});
+		} catch (err) {
+			summary = `Curator review failed: ${errorMessage(err)}`;
+		}
+		return `Curator review triggered.\n${summary}`;
+	}
+
+	// 默认：status
+	const enabledLabel = config.enabled ? "enabled" : "disabled";
+	const pausedLabel = state.paused ? " (paused)" : "";
+	const lastRun = state.last_run_at ?? "never";
+	const summary = state.last_run_summary ?? "(no summary yet)";
+	return [
+		`Curator: ${enabledLabel}${pausedLabel}`,
+		`Interval: ${config.intervalHours}h · stale after ${config.staleAfterDays}d · archive after ${config.archiveAfterDays}d`,
+		`Last run: ${lastRun} (run #${state.run_count})`,
+		`Summary: ${summary}`,
+	].join("\n");
 }
 
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
@@ -1210,12 +1291,32 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			return `Context: ${Math.round(usage.percent)}% (${formatTokenCount(usage.tokens)}/${formatTokenCount(usage.contextWindow)})`;
 		},
 		handle: async (_command, runtime) => {
-			await runtime.output(buildContextReportText(runtime));
+			await runtime.output(buildContextReportTextWithBreakdown(runtime));
 			return commandConsumed();
 		},
 		handleTui: (_command, runtime) => {
 			runtime.ctx.handleContextCommand();
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "skills-graph",
+		description: "Visualize the skill learning graph (skill + memory nodes, weighted edges)",
+		acpDescription: "Show skill learning graph",
+		getTuiAutocompleteDescription: runtime => {
+			const skills = runtime.ctx.session.skills;
+			if (skills.length === 0) return "Skills graph: no skills";
+			return `Skills graph: ${skills.length} skill${skills.length === 1 ? "" : "s"}`;
+		},
+		handle: async (_command, runtime) => {
+			await runtime.output(await buildSkillsGraphText(runtime));
+			return commandConsumed();
+		},
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.showStatus(
+				await buildSkillsGraphText({ session: runtime.ctx.session, settings: runtime.ctx.settings }),
+			);
 		},
 	},
 	{
@@ -1669,6 +1770,33 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleMemoryCommand(command.text);
+		},
+	},
+	{
+		name: "curator",
+		description: "Manage skill lifecycle curator (status, run, pause, resume)",
+		acpDescription: "Manage skill curator",
+		acpInputHint: "[status|run|pause|resume]",
+		subcommands: [
+			{ name: "status", description: "Show curator status (default)" },
+			{ name: "run", description: "Trigger a curator review now" },
+			{ name: "pause", description: "Pause automatic curator runs" },
+			{ name: "resume", description: "Resume automatic curator runs" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const enabled = runtime.ctx.settings.get("curator.enabled" as SettingPath);
+			return enabled ? "Curator: enabled" : "Curator: disabled";
+		},
+		handle: async (command, runtime) => {
+			const text = await handleCuratorCommand(command.args, runtime.settings);
+			await runtime.output(text);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const text = await handleCuratorCommand(command.args, runtime.ctx.settings);
+			runtime.ctx.showStatus(text);
 		},
 	},
 	{

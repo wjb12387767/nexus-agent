@@ -115,6 +115,20 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	backgroundReviewActive: () => {
+		try {
+			return Settings.instance.get("backgroundReview.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
+	curatorActive: () => {
+		try {
+			return Settings.instance.get("curator.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
 	autoThinkingActive: () => {
 		try {
 			return Settings.instance.get("defaultThinkingLevel") === "auto";

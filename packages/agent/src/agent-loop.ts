@@ -8,6 +8,7 @@ import {
 	type Context,
 	EventStream,
 	isApiKeyResolver,
+	type Model,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
 	streamSimple,
@@ -37,10 +38,11 @@ import {
 	recoverHarmonyToolCall,
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
+import { applyAnthropicCacheControl } from "@oh-my-pi/pi-ai/utils/prompt-caching";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import { DoomLoopDetector } from "./doom-loop-detector";
+import { type GuardrailDecision, DoomLoopDetector } from "./doom-loop-detector";
 import { agentPauseGate } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {
@@ -176,6 +178,30 @@ export function resolveOwnedDialectFromEnv(value: string | undefined): Dialect |
 		default:
 			return undefined;
 	}
+}
+
+/**
+ * Prompt caching 模式：
+ * - `"off"` — 不添加 cache_control 断点
+ * - `"auto"`（默认）— 对 Anthropic 兼容 provider 自动添加 cache_control 断点
+ */
+export type PromptCachingMode = "off" | "auto";
+
+let configuredPromptCaching: PromptCachingMode = "auto";
+
+/**
+ * 配置 prompt caching 模式。由 settings 层在启动与运行时变更时调用。
+ */
+export function configurePromptCaching(mode: PromptCachingMode | undefined): void {
+	configuredPromptCaching = mode ?? "auto";
+}
+
+/**
+ * 判断模型是否为 Anthropic 兼容（使用 `anthropic-messages` API），
+ * 可以接受 `cache_control` 断点标记。
+ */
+function isAnthropicCacheCompatible(model: Model): boolean {
+	return model.api === "anthropic-messages";
 }
 
 type AssistantContentBlock = AssistantMessage["content"][number];
@@ -1272,6 +1298,16 @@ async function streamAssistantResponse(
 		llmContext = await config.transformProviderContext(llmContext, model);
 	}
 
+	// Prompt caching：对 Anthropic 兼容 provider 自动添加 cache_control 断点
+	// （system_and_3 策略：1 个 developer/system + 最后 3 条非 system 消息）
+	if (configuredPromptCaching === "auto" && isAnthropicCacheCompatible(model)) {
+		const nativeAnthropic = model.provider === "anthropic";
+		llmContext = {
+			...llmContext,
+			messages: applyAnthropicCacheControl(llmContext.messages, "5m", nativeAnthropic),
+		};
+	}
+
 	// Owned tool calling: take tool calls away from the provider and run them
 	// through the selected in-band prompt dialect. `PI_DIALECT=1` still
 	// force-enables GLM; `PI_DIALECT=<dialect>` force-enables that dialect.
@@ -2003,19 +2039,29 @@ async function executeToolCalls(
 
 		record.args = effectiveArgs;
 
-		// Doom Loop 检测：在工具实际执行前记录一次调用并检查循环。
-		// detector 内部维护滑动窗口（跨 turn 共享），连续 K 个相同签名的
-		// 调用会触发告警并自动 reset 窗口。这里仅记录 warn 级别日志，不
-		// 阻断执行、不改 result 结构，让模型自己根据日志调整策略。
-		doomLoopDetector.recordCall(toolCall.name, effectiveArgs);
-		const doomAlert = doomLoopDetector.detect();
-		if (doomAlert) {
-			logger.warn("Doom loop detected", {
-				toolName: doomAlert.toolName,
-				consecutiveCount: doomAlert.consecutiveCount,
-				signature: doomAlert.signature,
-				message: doomAlert.message,
+		// Doom Loop 检测 + 工具护栏：在工具实际执行前记录一次调用并检查循环。
+		// detector 内部维护滑动窗口（跨 turn 共享）与失败/无进展计数。
+		// beforeCall 返回 GuardrailDecision：
+		//   - allow → 放行执行
+		//   - warn  → 放行但记录 warn 日志，提示模型改变策略
+		//   - block → 抛出 ToolCallBlockedError 阻断执行（需 hard_stop_enabled）
+		//   - halt  → 抛出 ToolCallBlockedError 硬停当前路径（需 hard_stop_enabled）
+		const beforeDecision: GuardrailDecision = doomLoopDetector.beforeCall(toolCall.name, effectiveArgs);
+		if (beforeDecision.action === "warn") {
+			logger.warn("Tool guardrail warning", {
+				toolName: beforeDecision.toolName,
+				code: beforeDecision.code,
+				count: beforeDecision.count,
+				message: beforeDecision.message,
 			});
+		} else if (beforeDecision.action === "block" || beforeDecision.action === "halt") {
+			logger.warn("Tool guardrail blocked", {
+				toolName: beforeDecision.toolName,
+				code: beforeDecision.code,
+				count: beforeDecision.count,
+				message: beforeDecision.message,
+			});
+			throw new ToolCallBlockedError(beforeDecision.message);
 		}
 
 		if (record.signal.aborted) {
@@ -2159,6 +2205,24 @@ async function executeToolCalls(
 				}
 			}
 		});
+
+		// 工具护栏 afterCall：在工具执行完成后记录结果（成功/失败/无进展），
+		// 更新内部计数并返回决策。工具已执行完毕，halt 决策仅作告警信号，
+		// 累积的失败计数会在下一次 beforeCall 触发 block。
+		const afterDecision: GuardrailDecision = doomLoopDetector.afterCall(
+			toolCall.name,
+			effectiveArgs,
+			result,
+			isError,
+		);
+		if (afterDecision.action === "warn" || afterDecision.action === "halt") {
+			logger.warn("Tool guardrail warning", {
+				toolName: afterDecision.toolName,
+				code: afterDecision.code,
+				count: afterDecision.count,
+				message: afterDecision.message,
+			});
+		}
 
 		const interrupted = interruptState.triggered;
 		const perToolAborted = record.signal.aborted;

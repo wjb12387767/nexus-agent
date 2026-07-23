@@ -1,5 +1,6 @@
 import { computeContextBreakdown } from "../../modes/utils/context-usage";
 import type { SlashCommandRuntime } from "../types";
+import { buildHermesBreakdownText } from "./context-breakdown-report";
 import { renderAsciiBar } from "./format";
 
 /**
@@ -63,4 +64,16 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 		if (!fallback) return "Context usage is unavailable.";
 		return ["Context", `Window: ${fallback.contextWindow}`, `Used: ${fallback.tokens ?? 0}`].join("\n");
 	}
+}
+
+/**
+ * Build the `/context` ACP-mode text with the hermes 8-category breakdown appended.
+ *
+ * 在现有上下文报告之后追加 hermes 风格的 8 类分类视图（受 `context.breakdown`
+ * 设置控制）。当设置关闭或无模型时不追加。
+ */
+export function buildContextReportTextWithBreakdown(runtime: SlashCommandRuntime): string {
+	const base = buildContextReportText(runtime);
+	const extra = buildHermesBreakdownText(runtime.session);
+	return extra ? `${base}\n${extra}` : base;
 }

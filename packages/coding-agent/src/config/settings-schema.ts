@@ -119,7 +119,7 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	appearance: ["Theme", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
+	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision", "Streaming"],
 	interaction: [
 		"Input",
 		"Approvals",
@@ -133,9 +133,9 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Git",
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
+	memory: ["General", "Auto-Learn", "Background Review", "Curator", "Mnemopi", "Hindsight"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
-	shell: ["Bash", "Sandbox", "Eval & Runtimes"],
+	shell: ["Bash", "Sandbox", "Eval & Runtimes", "File Safety"],
 	tools: [
 		"Available Tools",
 		"Todos",
@@ -2919,6 +2919,91 @@ export const SETTINGS_SCHEMA = {
 	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
 	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
 
+	// Background Review (experimental): after each turn, fire-and-forget a
+	// lightweight review that may save memories or update skills. Master flag is
+	// default-off → zero footprint; sub-flags gate notification verbosity and the
+	// optional auxiliary model that drives a digest-based review path.
+	"backgroundReview.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Background Review",
+			label: "Background Review (experimental)",
+			description:
+				"After each turn ends, fire-and-forget a lightweight review that may save memories or update skills",
+		},
+	},
+	"backgroundReview.notificationMode": {
+		type: "enum",
+		values: ["off", "on", "verbose"] as const,
+		default: "on",
+		ui: {
+			tab: "memory",
+			group: "Background Review",
+			label: "Background Review Notification",
+			description:
+				"off = silent; on = show created/updated/patched summary; verbose = add a 120-char preview per action",
+			condition: "backgroundReviewActive",
+			options: [
+				{ value: "off", label: "Off", description: "No review result shown" },
+				{ value: "on", label: "On", description: "Show created/updated/patched summary" },
+				{ value: "verbose", label: "Verbose", description: "Also show a 120-char preview per action" },
+			],
+		},
+	},
+	// Config-file-only knob: when set, the review runs on a digest of history
+	// through a distinct auxiliary model rather than the parent agent's runtime.
+	"backgroundReview.auxModel": { type: "string", default: undefined },
+
+	// Curator (experimental): periodically archive stale skills based on a
+	// 7-day cycle and a 30/90-day STALE/ARCHIVE state machine. Pinned skills and
+	// cron-referenced skills are always skipped.
+	"curator.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Curator",
+			label: "Curator (experimental)",
+			description:
+				"Periodically archive stale skills: ACTIVE → STALE (30d unused) → ARCHIVED (90d unused). Pinned and cron-referenced skills are always skipped.",
+		},
+	},
+	"curator.intervalHours": {
+		type: "number",
+		default: 168,
+		ui: {
+			tab: "memory",
+			group: "Curator",
+			label: "Curator Interval (hours)",
+			description: "Hours between curator runs; default 168 (7 days).",
+			condition: "curatorActive",
+		},
+	},
+	"curator.staleAfterDays": {
+		type: "number",
+		default: 30,
+		ui: {
+			tab: "memory",
+			group: "Curator",
+			label: "Curator Stale After (days)",
+			description: "Days of inactivity before a skill is marked STALE; default 30.",
+			condition: "curatorActive",
+		},
+	},
+	"curator.archiveAfterDays": {
+		type: "number",
+		default: 90,
+		ui: {
+			tab: "memory",
+			group: "Curator",
+			label: "Curator Archive After (days)",
+			description: "Days of inactivity before a STALE skill is archived; default 90.",
+			condition: "curatorActive",
+		},
+	},
+
 	// TTSR
 	"ttsr.enabled": {
 		type: "boolean",
@@ -4527,6 +4612,29 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.includeSkills": { type: "array", default: [] as string[] },
 
+	"skills.learningGraph": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Skills",
+			label: "Learning Graph",
+			description: "Enable the /skills-graph command to visualize the skill learning graph",
+		},
+	},
+
+	// Context Breakdown
+	"context.breakdown": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Context Breakdown",
+			label: "Context Breakdown",
+			description: "Show the 8-category context usage breakdown in /context",
+		},
+	},
+
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
@@ -5261,6 +5369,93 @@ export const SETTINGS_SCHEMA = {
 	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
 
 	"thinkingBudgets.max": { type: "number", default: 32768 },
+
+	// ────────────────────────────────────────────────────────────────────────
+	// File Safety (credential path protection + .env read blocking)
+	// ────────────────────────────────────────────────────────────────────────
+	"fileSafety.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "shell",
+			group: "File Safety",
+			label: "File Safety",
+			description:
+				"Block writes to credential paths (~/.ssh, ~/.aws, ~/.env, /etc/sudoers, etc.) and reads of .env files via beforeToolCall guard (defense-in-depth, not a security boundary)",
+		},
+	},
+
+	"fileSafety.blockEnvFiles": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "shell",
+			group: "File Safety",
+			label: "Block .env Reads",
+			description: "Block reads of .env / .env.local / .env.production and similar secret-bearing environment files",
+		},
+	},
+
+	"fileSafety.customDeniedPaths": { type: "array", default: EMPTY_STRING_ARRAY },
+
+	// ────────────────────────────────────────────────────────────────────────
+	// Streaming optimizations (think-scrubber & prompt caching)
+	// ────────────────────────────────────────────────────────────────────────
+
+	"ai.thinkScrubber": {
+		type: "enum",
+		values: ["off", "leaked", "aggressive"] as const,
+		default: "leaked",
+		ui: {
+			tab: "model",
+			group: "Streaming",
+			label: "Think Scrubber",
+			description:
+				"Control how leaked thinking/reasoning tags in streamed text are scrubbed. \"leaked\" only heals non-official endpoints; \"aggressive\" heals all endpoints; \"off\" disables scrubbing entirely.",
+			options: [
+				{
+					value: "off",
+					label: "Off",
+					description: "Do not scrub leaked thinking tags",
+				},
+				{
+					value: "leaked",
+					label: "Leaked Only",
+					description: "Scrub only on non-official endpoints (default)",
+				},
+				{
+					value: "aggressive",
+					label: "Aggressive",
+					description: "Scrub on all endpoints, including official ones",
+				},
+			],
+		},
+	},
+
+	"ai.promptCaching": {
+		type: "enum",
+		values: ["off", "auto"] as const,
+		default: "auto",
+		ui: {
+			tab: "model",
+			group: "Streaming",
+			label: "Prompt Caching",
+			description:
+				"Automatically add Anthropic cache_control breakpoints to messages for Anthropic-compatible providers. \"auto\" applies the system_and_3 strategy (1 system + last 3 non-system messages); \"off\" disables caching.",
+			options: [
+				{
+					value: "off",
+					label: "Off",
+					description: "Do not add cache_control breakpoints",
+				},
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Automatically add cache_control breakpoints (default)",
+				},
+			],
+		},
+	},
 } as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5431,6 +5626,8 @@ export interface SkillsSettings {
 	ignoredSkills?: string[];
 	includeSkills?: string[];
 	disabledExtensions?: string[];
+	/** 是否启用 /skills-graph 技能学习图谱可视化。 */
+	learningGraph?: boolean;
 }
 
 export interface CommitSettings {

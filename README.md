@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <em>Fork of <a href="https://github.com/can1357/oh-my-pi">Oh My Pi (omp)</a> · absorbs capabilities from <a href="https://github.com/xai-org/grok-build">Grok Build</a> and <a href="https://github.com/Gitlawb/openclaude">OpenClaude</a></em>
+  <em>Fork of <a href="https://github.com/can1357/oh-my-pi">Oh My Pi (omp)</a> · absorbs capabilities from <a href="https://github.com/xai-org/grok-build">Grok Build</a>, <a href="https://github.com/Gitlawb/openclaude">OpenClaude</a>, and hermes-agent</em>
 </p>
 
 ---
@@ -38,6 +38,7 @@
 - [Configuration](#configuration)
 - [MCP Integrations (optional)](#mcp-integrations-optional)
 - [Documentation](#documentation)
+- [AI Layer Optimizations](#ai-layer-optimizations)
 - [Engineering Manual (工业手册)](#engineering-manual-工业手册)
 - [Known Limitations](#known-limitations)
 - [Sponsor / 赞助](#sponsor--赞助)
@@ -45,17 +46,18 @@
 
 ## Overview
 
-Nexus Agent is an open-source AI coding agent that fuses three flagship
-open-source coding agents — **omp**, **Grok Build**, and **OpenClaude** — into
-a single engineering base. The goal is not to build "yet another agent", but to
-preserve each project's irreplaceable capability layer while eliminating their
-individual gaps.
+Nexus Agent is an open-source AI coding agent that fuses four flagship
+open-source coding agents — **omp**, **Grok Build**, **OpenClaude**, and
+**hermes-agent** — into a single engineering base. The goal is not to build
+"yet another agent", but to preserve each project's irreplaceable capability
+layer while eliminating their individual gaps.
 
 | Source | Role | Irreplaceable capability |
 |---|---|---|
 | **omp** | base | 60+ tools · Hashline edit protocol · 50+ providers · Mnemopi memory · LSP+DAP · multi-language eval · Collab |
 | **Grok Build** | ported | OS-level sandbox (Landlock / Seatbelt) · Checkpoint rollback · Multi-level compaction |
 | **OpenClaude** | ported | gRPC server · VS Code extension · per-agent model routing · Bash AST security walker |
+| **hermes-agent** | ported | Self-improvement loop (background review + curator + learn + learning graph) |
 
 The result is a single CLI entry point `nexus` that combines industrial-grade
 security, service-oriented deployment, and broad model / tool coverage — all
@@ -63,7 +65,7 @@ under the MIT license.
 
 ## Why Nexus
 
-Each of the three upstream projects solves a **different, non-overlapping**
+Each of the four upstream projects solves a **different, non-overlapping**
 class of problems:
 
 - **omp** solves *breadth*: it has the richest tool layer and provider matrix,
@@ -72,11 +74,15 @@ class of problems:
   isolation and checkpoint-based rollback, but a thin tool layer.
 - **OpenClaude** solves *service & IDE integration*: it ships a gRPC server and
   a VS Code extension, but no sandbox or memory backend.
+- **hermes-agent** solves *self-improvement*: it has a background-review loop,
+  skill curator, guided learning, and a learning graph, but no sandbox,
+  service layer, or broad tool matrix.
 
-Nexus takes the position that these three concerns — breadth, safety,
-service — are **orthogonal axes** of an industrial coding agent, and that
-combining them on a single base is more valuable than any one in isolation. The
-hardening layer on top closes the remaining known gaps in all three upstreams.
+Nexus takes the position that these four concerns — breadth, safety,
+service, self-improvement — are **orthogonal axes** of an industrial coding
+agent, and that combining them on a single base is more valuable than any one
+in isolation. The hardening layer on top closes the remaining known gaps in all
+upstreams.
 
 ## Architecture
 
@@ -95,7 +101,7 @@ supported** — it causes NAPI compatibility issues).
 
 ### Hardening layer
 
-On top of the three-way fusion, Nexus adds three capabilities that close known
+On top of the four-way fusion, Nexus adds five capabilities that close known
 gaps in every upstream agent:
 
 | Capability | What it does | Where |
@@ -103,10 +109,35 @@ gaps in every upstream agent:
 | **Bash AST security analysis** | tree-sitter-bash AST allowlist with `varScope` tracking and `declare -n` nameref detection, layered ahead of the legacy regex approver. Fail-closed: parse failure falls back to regex. | [`packages/nexus-bash-ast/`](./packages/nexus-bash-ast) · [`crates/pi-natives/src/bash_ast.rs`](./crates/pi-natives/src/bash_ast.rs) |
 | **Doom loop detection** | Sliding-window detector that flags repeated identical `(tool, args)` calls across turns and nudges the model to change strategy. Orthogonal to `MAX_SOFT_TOOL_ESCALATIONS` and `noopLoopGuard`. | [`packages/agent/src/doom-loop-detector.ts`](./packages/agent/src/doom-loop-detector.ts) |
 | **Destructive regression suite** | End-to-end tests covering sandbox-rejects-escape + checkpoint-restore, reflink CoW isolation, bash AST + sandbox dual defense, and compaction + checkpoint interaction. | [`packages/coding-agent/test/integration/destructive-regression.test.ts`](./packages/coding-agent/test/integration/destructive-regression.test.ts) |
+| **Tool guardrails** | Failure-tracking guardrails layered on the doom-loop detector: classifies exact-failure / same-tool-failure / no-progress patterns and returns one of four decisions (allow / warn / block / halt). Idempotent vs mutating tool sets. | [`packages/agent/src/doom-loop-detector.ts`](./packages/agent/src/doom-loop-detector.ts) |
+| **File safety** | Credential-path protection (`.ssh` / `.aws` / `.gnupg` / `.kube` / `.docker` / `.azure` / `.env` / `.netrc` / `.pgpass` / `.git-credentials` …) and `.env` read interception. Defense-in-depth, not a security boundary. | [`packages/coding-agent/src/tools/file-safety.ts`](./packages/coding-agent/src/tools/file-safety.ts) |
+
+### Self-improvement layer
+
+Fused from **hermes-agent**, this layer closes the self-improvement gap: the
+agent learns from its own turns, curates stale skills, and visualizes what it
+knows. Together the four capabilities form a **self-improvement loop**:
+`learn` (guided skill authoring) → `background review` (per-turn auto-evaluation)
+→ `curator` (lifecycle management) → `learning graph` (visualization).
+
+| Capability | What it does | Where |
+|---|---|---|
+| **Background review** | After each turn, a fire-and-forget fork sub-agent re-evaluates the conversation and saves durable memories or skills. Tool whitelist: memory + skill_manage only. Three notification modes (off / on / verbose). | [`packages/coding-agent/src/background-review.ts`](./packages/coding-agent/src/background-review.ts) |
+| **Curator** | 7-day periodic skill lifecycle manager. State machine `ACTIVE → STALE (30d) → ARCHIVED (90d)`. Pinned skills and cron-referenced skills are exempt. `/curator` slash command (status / run / pause / resume). | [`packages/coding-agent/src/curator.ts`](./packages/coding-agent/src/curator.ts) |
+| **/learn command** | Standardized skill-learning guidance. Enforces authoring standards (name ≤ 64, description ≤ 60, version `0.1.0`) and an 8-section body structure. Drives the model to gather sources, author one `SKILL.md`, and save it. | [`.nexus/commands/learn.md`](./.nexus/commands/learn.md) · [`packages/coding-agent/src/learn-prompt.ts`](./packages/coding-agent/src/learn-prompt.ts) |
+| **Learning graph** | Skill + memory bipartite graph for visualization. Lexical-overlap edge scoring with skill-name-hit bonus. `/skills-graph` slash command. | [`packages/coding-agent/src/learning-graph.ts`](./packages/coding-agent/src/learning-graph.ts) |
+
+All four are **opt-in** (default off) to preserve backward compatibility with
+the beta. Enable them individually in `~/.nexus/agent/config.yml` or the
+project `.nexus/` directory.
 
 ## Status
 
-**v1.0.0-beta** — all nine milestones (M0–M9) shipped, plus the hardening layer.
+**v1.0.0-beta (post-beta incremental)** — all nine milestones (M0–M9) shipped,
+plus the hardening layer. On top of the beta, nine capabilities fused from
+hermes-agent landed as an incremental layer: four self-improvement capabilities
+(A class), two hardening extensions (B class), and three AI-layer optimizations
+(B class). All are opt-in (default off) to preserve backward compatibility.
 CI matrix + release pipeline online. Docker images published to GHCR on every
 tag push. See [ROADMAP.md](./ROADMAP.md) for the milestone history and
 [CHANGELOG.md](./CHANGELOG.md) for what landed in this release.
@@ -124,6 +155,7 @@ tag push. See [ROADMAP.md](./ROADMAP.md) for the milestone history and
 | M8 | Final rebrand + v1.0.0-alpha | ✅ done |
 | M9 | CI matrix + release pipeline → v1.0.0-beta | ✅ done |
 | Hardening | Bash AST + doom loop + destructive regression | ✅ done |
+| hermes fusion | Self-improvement layer + hardening extensions + AI optimizations | ✅ done |
 
 ## Install
 
@@ -344,6 +376,17 @@ reference, or use [mcp.json.example](./mcp.json.example) as a template.
 - [CHANGELOG.md](./CHANGELOG.md) — release notes for v1.0.0-beta and prior
 - [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md) — upstream attributions (omp / Grok / OpenClaude)
 
+## AI Layer Optimizations
+
+Three optimizations fused from hermes-agent that reduce cost, improve
+observability, and harden the AI layer against provider quirks:
+
+| Optimization | What it does | Where |
+|---|---|---|
+| **Prompt caching** | Anthropic `cache_control` breakpoint strategy (`system_and_3`: 1 system + 3 non-system = 4 breakpoints, the Anthropic per-request cap). Deep-clones messages, never mutates the input array. ~75% input-token savings on cached prefixes. | [`packages/ai/src/utils/prompt-caching.ts`](./packages/ai/src/utils/prompt-caching.ts) |
+| **Context breakdown** | Cursor-style context-usage decomposition into 8 categories (system_prompt / tool_definitions / rules / skills / mcp / subagent_definitions / memory / conversation). char/4 token estimate, no tokenizer dependency. `/context` slash command. | [`packages/agent/src/context-breakdown.ts`](./packages/agent/src/context-breakdown.ts) |
+| **Think scrubber** | Live healing of leaked reasoning markup in the visible text channel. Handles 5 tag variants (`think` / `thinking` / `reasoning` / `thought` / `REASONING_SCRATCHPAD`), three-state machine, boundary-gated semantics, cross-delta partial-tag holdback. | [`packages/ai/src/utils/leaked-thinking-stream.ts`](./packages/ai/src/utils/leaked-thinking-stream.ts) |
+
 ## Engineering Manual (工业手册)
 
 This repository ships with a **~80,000-word engineering manual** —
@@ -355,21 +398,23 @@ of the user docs — it answers a deeper question: *when an AI coding agent is
 pushed to industrial grade, what does its interior actually look like, and what
 engineering trade-offs lie behind each design decision?*
 
-**Structure** (20 chapters + 2 appendices, ~2,229 lines):
+**Structure** (22 chapters + 4 appendices, ~2,500 lines):
 
 | Part | Chapters | Coverage |
 |---|---|---|
-| **序言 + 第一 ~ 三章** | Project origin · tech stack · runtime internals | Why fuse three agents · TS+Rust+Bun · NAPI loader · module map |
+| **序言 + 第一 ~ 三章** | Project origin · tech stack · runtime internals | Why fuse four agents · TS+Rust+Bun · NAPI loader · module map |
 | **第四 ~ 八章** | Tool system · provider federation · native modules | 60+ tools · Hashline edit · 50+ providers · Rust crates · NAPI binding contract |
 | **第九 ~ 十二章** | Sandbox · checkpoint · compaction · memory | Landlock/Seatbelt · reflink CoW · 4-level compaction · mnemopi 3-backend split |
 | **第十三 ~ 十六章** | TUI · i18n · repo map · MCP runtime | Ink renderer · zh-CN · tree-sitter repomap · stdio/SSE/HTTP transports |
 | **第十七 ~ 十八章** | gRPC · VS Code extension | Bidirectional stream protocol · stdio + grpc transports · permission modes |
 | **第十九 ~ 二十章** | Hardening layer · security model | Bash AST walker · doom loop · destructive regression · fail-closed principle |
-| **附录 A / B** | Tool catalog · env vars | 60+ tool reference · all environment variables |
+| **第二十一章** | Self-improvement layer (hermes-agent fusion) | Background review · curator · /learn · learning graph · tool guardrails · file safety · prompt caching · context breakdown · think scrubber |
+| **第二十二章** | Evaluation framework | Multi-dimensional scorecard · layered conclusions · risk inventory |
+| **附录 A / B / C / D** | Glossary · further reading · syllabus · default config | Terminology · reading list · 10-lesson syllabus · key defaults |
 
 **Recommended reading order**:
 
-- **First pass** (global picture): 序言 + Ch. 1, 2, 3, 19, 20
+- **First pass** (global picture): 序言 + Ch. 1, 2, 3, 19, 20, 21
 - **Second pass** (by interest): dive into any专题 chapter — chapters are
   relatively independent and can be read out of order.
 

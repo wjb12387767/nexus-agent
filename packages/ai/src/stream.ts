@@ -136,11 +136,29 @@ function isOfficialCodexApiUrl(baseUrl: string | undefined): boolean {
 }
 
 /**
- * Apply live leaked-thinking healing unless {@link model} is an official
- * first-party endpoint ({@link isLeakedThinkingHealExempt}), which emits
- * structured thinking and needs no healing.
+ * Think-scrubber 模式：
+ * - `"off"` — 不清洗（所有端点跳过）
+ * - `"leaked"`（默认）— 仅非 official 端点清洗（现有行为）
+ * - `"aggressive"` — 所有端点都清洗 think 标签
+ */
+export type ThinkScrubberMode = "off" | "leaked" | "aggressive";
+
+let configuredThinkScrubber: ThinkScrubberMode = "leaked";
+
+/**
+ * 配置 think-scrubber 模式。由 settings 层在启动与运行时变更时调用。
+ */
+export function configureThinkScrubber(mode: ThinkScrubberMode | undefined): void {
+	configuredThinkScrubber = mode ?? "leaked";
+}
+
+/**
+ * Apply live leaked-thinking healing. 默认 (`"leaked"`) 仅对非 official 端点
+ * 清洗；`"aggressive"` 对所有端点清洗；`"off"` 完全跳过。
  */
 function healLeakedThinking(model: Model<Api>, inner: AssistantMessageEventStream): AssistantMessageEventStream {
+	if (configuredThinkScrubber === "off") return inner;
+	if (configuredThinkScrubber === "aggressive") return wrapLeakedThinkingStream(inner);
 	return isLeakedThinkingHealExempt(model) ? inner : wrapLeakedThinkingStream(inner);
 }
 

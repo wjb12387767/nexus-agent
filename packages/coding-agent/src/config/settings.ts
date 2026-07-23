@@ -14,7 +14,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
+import { configureProviderMaxInFlightRequests, configureThinkScrubber } from "@oh-my-pi/pi-ai/stream";
+import { configurePromptCaching } from "@oh-my-pi/pi-agent-core/agent-loop";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -1854,6 +1855,16 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"providers.maxInFlightRequests": value => {
 		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
 	},
+	"ai.thinkScrubber": value => {
+		if (value === "off" || value === "leaked" || value === "aggressive") {
+			configureThinkScrubber(value);
+		}
+	},
+	"ai.promptCaching": value => {
+		if (value === "off" || value === "auto") {
+			configurePromptCaching(value);
+		}
+	},
 	"hindsight.bankId": () => hindsightScopeSignal.fire(),
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
 	"hindsight.scoping": () => hindsightScopeSignal.fire(),
@@ -1936,6 +1947,8 @@ export function resetSettingsForTest(): void {
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();
 	configureProviderMaxInFlightRequests(undefined);
+	configureThinkScrubber(undefined);
+	configurePromptCaching(undefined);
 }
 
 /**

@@ -8,6 +8,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Self-improvement layer (hermes-agent fusion)
+
+Nine capabilities fused from hermes-agent, landing as an incremental layer on
+top of the v1.0.0-beta. All are opt-in (default off) to preserve backward
+compatibility. Split into three classes:
+
+**A class — Self-improvement closed loop (4 capabilities):**
+
+- **Background review** (`packages/coding-agent/src/background-review.ts`): after
+  each turn, a fire-and-forget fork sub-agent re-evaluates the conversation and
+  saves durable memories or skills. Tool whitelist (`memory` / `memory_edit` /
+  `memory_search` / `recall` / `retain` / `reflect` / `skill_manage` /
+  `manage_skill`) prevents the review agent from touching the filesystem or
+  executing commands. Three prompt modes: `MEMORY_REVIEW` / `SKILL_REVIEW` /
+  `COMBINED_REVIEW`. Digest strategy: keeps the last `digestTail` (default 24)
+  messages + an older-message summary when an `auxModel` is configured.
+  Notification modes: off / on / verbose. Failures are silently caught
+  (logger.debug) so the review never breaks the main loop.
+- **Curator** (`packages/coding-agent/src/curator.ts`): 7-day periodic skill
+  lifecycle manager. State machine `ACTIVE → STALE (30d unused) → ARCHIVED
+  (90d unused)`. Minimum idle 2h before a run. First run seeds
+  `last_run_at = now` and waits a full interval. Pinned skills and
+  cron-referenced skills are exempt. State persisted atomically to
+  `~/.nexus/agent/.curator_state`; reports written to
+  `~/.nexus/logs/curator/{timestamp}/REPORT.md`. `/curator` slash command
+  (status / run / pause / resume).
+- **/learn command** (`.nexus/commands/learn.md` +
+  `packages/coding-agent/src/learn-prompt.ts`): standardized skill-learning
+  guidance. Enforces `AUTHORING_STANDARDS` (name ≤ 64 chars, `[a-z0-9-]` only;
+  description ≤ 60 chars hard rule; version `"0.1.0"`; author `"Nexus Agent"`)
+  and an 8-section body structure (Title / When to Use / Prerequisites / How to
+  Run / Quick Reference / Procedure / Pitfalls / Verification). Drives the
+  model to gather sources, author one `SKILL.md`, and save via `skill_manage`.
+- **Learning graph** (`packages/coding-agent/src/learning-graph.ts`): skill +
+  memory bipartite graph for visualization. `SkillNode` + `MemoryCard` data
+  structures; `buildSkillNodes` / `buildEdges` / `densityStats` pure functions.
+  Edge scoring: lexical-overlap (`_tokenize` intersection) with a `+6`
+  skill-name-hit bonus for memory-skill edges. char/4 token estimate (no
+  tokenizer dependency). `/skills-graph` slash command.
+
+**B class — Hardening extensions (2 capabilities):**
+
+- **Tool guardrails** (extends `packages/agent/src/doom-loop-detector.ts`):
+  failure-tracking guardrails layered on the existing doom-loop detector (not a
+  new module). Adds `beforeCall` / `afterCall` hooks that classify three
+  failure modes — `exact_failure` (same signature repeated), `same_tool_failure`
+  (same tool, different args), `no_progress` (idempotent tool returning
+  identical results) — and return one of four decisions: `allow` / `warn` /
+  `block` / `halt`. `IDEMPOTENT_TOOL_NAMES` (read / grep / glob / ast_grep /
+  web_search / web_fetch / browser_snapshot / lsp) vs `MUTATING_TOOL_NAMES`
+  (bash / write / edit / ast_edit / todo / memory / skill_manage /
+  browser_click / browser_type / browser_navigate / task). `hard_stop_enabled`
+  defaults to false (interactive sessions only warn by default).
+- **File safety** (`packages/coding-agent/src/tools/file-safety.ts`): credential
+  path protection via `beforeToolCall` hook. `buildWriteDeniedPaths` covers
+  `.ssh/authorized_keys`, `.ssh/id_rsa`, `.ssh/id_ed25519`, `.ssh/config`,
+  `.env`, `.netrc`, `.pgpass`, `.npmrc`, `.pypirc`, `.git-credentials`,
+  `/etc/sudoers`, `/etc/passwd`, `/etc/shadow`. `buildWriteDeniedPrefixes`
+  covers `.ssh/`, `.aws/`, `.gnupg/`, `.kube/`, `.docker/`, `.azure/`,
+  `.config/gh/`, `.config/gcloud/`, `/etc/sudoers.d/`, `/etc/systemd/`. `.env`
+  file read interception (`.env` / `.env.local` / `.env.development` /
+  `.env.production` / `.env.test` / `.env.staging` / `.envrc`).
+  `NEXUS_WRITE_SAFE_ROOT` env var restricts writes to listed roots.
+  Defense-in-depth — not a security boundary (bash runs as the same OS user
+  and can bypass).
+
+**B class — AI layer optimizations (3 capabilities):**
+
+- **Prompt caching** (`packages/ai/src/utils/prompt-caching.ts`): Anthropic
+  `cache_control` breakpoint strategy `system_and_3` (1 system/developer + 3
+  non-system tail = 4 breakpoints, the Anthropic per-request cap). Pure
+  function: deep-clones messages via `structuredClone`, never mutates the input
+  array. `canCarryMarker` gates which messages can carry a marker (native
+  Anthropic toolResult gets a top-level marker; non-native gets it on the last
+  content part). `CacheTtl` supports `"5m"` (default, no ttl field) and `"1h"`.
+- **Context breakdown** (`packages/agent/src/context-breakdown.ts`): Cursor-style
+  context-usage decomposition into 8 categories (`system_prompt` /
+  `tool_definitions` / `rules` / `skills` / `mcp` / `subagent_definitions` /
+  `memory` / `conversation`), each with a CSS-variable color, label, and
+  estimated token count. char/4 token estimate (`_charsToTokens`), no tokenizer
+  dependency. `computeContextBreakdown` takes an `AgentLike` minimal view +
+  message list. `/context` slash command.
+- **Think scrubber** (extends `packages/ai/src/utils/leaked-thinking-stream.ts`):
+  `StreamingThinkScrubber` class — a standalone text-only scrubber (separate
+  from the `LeakedThinkingProjector` event-stream healer). Handles 5 tag
+  variants (`think` / `thinking` / `reasoning` / `thought` /
+  `REASONING_SCRATCHPAD`), case-insensitive. Three-state machine
+  (`inBlock` / `buf` / `lastEmittedEndedNewline`). Boundary-gated semantics:
+  open tags only match at line-start / whitespace-preceded positions (prevents
+  inline prose mentions from being swallowed). Closed pairs are always
+  swallowed regardless of boundary. Orphan close tags are stripped. Cross-delta
+  partial tags are held back via `_max_partial_suffix`.
+
 ### Added — MCP integrations
 
 Four open-source MCP servers deeply integrated for general-purpose agent
