@@ -143,6 +143,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	sandboxActive: () => {
+		try {
+			return Settings.instance.get("sandbox.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

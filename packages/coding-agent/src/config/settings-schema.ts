@@ -135,7 +135,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
 	memory: ["General", "Auto-Learn", "Background Review", "Curator", "Mnemopi", "Hindsight"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
-	shell: ["Bash", "Sandbox", "Eval & Runtimes", "File Safety"],
+	shell: ["Bash", "Sandbox", "Eval & Runtimes", "File Safety", "WSL Bridge"],
 	tools: [
 		"Available Tools",
 		"Todos",
@@ -3525,6 +3525,37 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"sandbox.fallbackBehavior": {
+		type: "enum",
+		values: ["error", "warn", "continue"] as const,
+		default: "warn",
+		ui: {
+			tab: "shell",
+			group: "Sandbox",
+			condition: "sandboxActive",
+			label: "Fallback Behavior",
+			description:
+				"What to do when the sandbox is enabled but the OS backend is unavailable (e.g. Windows ISO FS not present): error (fail startup), warn (log and continue unsandboxed), continue (silently continue unsandboxed)",
+			options: [
+				{
+					value: "error",
+					label: "Error",
+					description: "Fail startup; require sandbox.enabled=false to run unsandboxed",
+				},
+				{
+					value: "warn",
+					label: "Warn",
+					description: "Log a warning and continue running WITHOUT sandboxing",
+				},
+				{
+					value: "continue",
+					label: "Continue",
+					description: "Silently continue running WITHOUT sandboxing (legacy behavior)",
+				},
+			],
+		},
+	},
+
 	// Eval (per-backend toggles; add more as new backends ship, e.g. eval.ts)
 	"eval.py": {
 		type: "boolean",
@@ -5397,6 +5428,43 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	"fileSafety.customDeniedPaths": { type: "array", default: EMPTY_STRING_ARRAY },
+
+	// ────────────────────────────────────────────────────────────────────────
+	// WSL Bridge (Windows → WSL2 Linux capabilities: Landlock sandbox, reflink checkpoint, native bash)
+	// ────────────────────────────────────────────────────────────────────────
+	"wsl.autoDetect": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "shell",
+			group: "WSL Bridge",
+			label: "Auto-Detect WSL2",
+			description:
+				"On Windows native mode, detect WSL2 at startup and prompt to relaunch inside it for full Linux capabilities (Landlock sandbox, reflink checkpoint, native bash AST)",
+		},
+	},
+
+	"wsl.preferredDistro": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "shell",
+			group: "WSL Bridge",
+			label: "Preferred WSL Distribution",
+			description: "WSL distribution used by `nexus wsl launch` when --distro is not given",
+		},
+	},
+
+	"wsl.suppressHint": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "WSL Bridge",
+			label: "Suppress WSL Hint",
+			description: "Hide the one-time startup hint that suggests relaunching inside WSL2 on Windows native mode",
+		},
+	},
 
 	// ────────────────────────────────────────────────────────────────────────
 	// Streaming optimizations (think-scrubber & prompt caching)

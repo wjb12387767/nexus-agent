@@ -47,6 +47,8 @@ export const commands: CommandEntry[] = [
 	// M5: Nexus gRPC server 与 REPL 测试客户端
 	{ name: "grpc", load: () => import("./commands/grpc").then(m => m.default) },
 	{ name: "grpc-cli", load: () => import("./commands/grpc-cli").then(m => m.default) },
+	// WSL2 桥接：让 Windows 用户通过 WSL2 获得完整 Linux 能力
+	{ name: "wsl", load: () => import("./commands/wsl").then(m => m.default) },
 ];
 
 // Documented-looking plugin/marketplace verbs that are NOT registered top-level

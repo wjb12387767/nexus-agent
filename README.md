@@ -455,6 +455,48 @@ of the following limitations before using or contributing:
 - **Build requirements:** Bun ≥ 1.3.14 + Rust ≥ 1.92.0 (stable). The build
   compiles Rust NAPI native modules, which takes 10–20 minutes on first run.
 
+### Windows Platform Limitations
+
+Nexus Agent on Windows has reduced capabilities compared to Linux/macOS:
+
+- **Sandbox**: Windows uses ISO FS (Projected FS) for workspace isolation, which
+  provides view merging but NO kernel-enforced deny. Landlock (Linux) and Seatbelt
+  (macOS) are unavailable. For full sandboxing, use WSL2 (`nexus wsl launch`) or
+  Docker mode.
+- **Checkpoint**: Windows falls back to full file copy (O(N)) instead of reflink
+  CoW (O(1) on Linux btrfs/macOS APFS). Large workspaces will see slower
+  checkpoints and higher disk usage.
+- **Bash tools**: Requires Git for Windows (Git Bash). Without it, bash tool and
+  AST security analysis are non-functional. PowerShell is not directly supported
+  as a shell backend.
+- **Docker**: The Dockerfile and docker-compose.yml target Linux containers.
+  Windows users need Docker Desktop with WSL2 backend.
+- **Native modules**: Windows .node addons are cross-compiled on Linux CI runners.
+  While we verify napi exports and run a best-effort `wine` smoke test of the
+  cross-built binary, there is no real native-Windows-runtime smoke test in CI.
+
+**Recommended Windows setups (by capability):**
+
+| Setup | Sandbox | Checkpoint | Bash/AST | Ease |
+|---|---|---|---|---|
+| WSL2 mode (`nexus wsl launch`) | Full (Landlock) | Full (reflink) | Full (native bash) | Medium |
+| Docker mode (`docker compose up`) | Full (container) | Full (container) | Full (container) | Easy |
+| Native Windows | Limited (ISO FS) | Limited (full copy) | Requires Git Bash | Easiest |
+
+### Windows: WSL2 Bridge
+
+To get full Linux capabilities (Landlock sandbox, reflink checkpoint, native bash)
+on Windows, use the built-in WSL2 bridge:
+
+```bash
+nexus wsl status    # check WSL2 availability
+nexus wsl launch    # start agent inside WSL2
+nexus wsl install   # show installation guide for WSL
+```
+
+When running in native Windows mode, Nexus auto-detects WSL2 and suggests
+switching if available. Suppress with `wsl.suppressHint=true`.
+
 ## Sponsor / 赞助
 
 If Nexus Agent saves you time, a coffee helps keep the project alive.

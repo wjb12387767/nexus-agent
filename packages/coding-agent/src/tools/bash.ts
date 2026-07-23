@@ -56,6 +56,21 @@ const BASH_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
 
 /**
+ * Internal sentinel thrown by `#runSandboxed` when `SandboxHandle.apply()`
+ * fails (e.g. the OS sandbox backend is unavailable on Windows). The bash
+ * tool's sandbox call site catches this and applies `sandbox.fallbackBehavior`
+ * (error/warn/continue) instead of always hard-failing.
+ */
+class SandboxUnavailableError extends Error {
+	readonly profile: string;
+	constructor(message: string, profile: string) {
+		super(message);
+		this.name = "SandboxUnavailableError";
+		this.profile = profile;
+	}
+}
+
+/**
  * Shape a shell command line for an ACP-conformant `terminal/create` request.
  *
  * ACP's `command` field is documented as the executable and `args` as its
@@ -481,6 +496,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	// 沙箱应用是不可逆的，所以句柄在第一次 exec 后保持，所有后续 bash 调用
 	// 复用同一个已应用沙箱的进程级状态。
 	#sandboxHandle: SandboxHandle | null = null;
+	// 当沙箱 apply 失败且 `sandbox.fallbackBehavior` 为 warn/continue 时置为
+	// true，后续 bash 调用直接走非沙箱执行路径，不再重复尝试 apply。
+	#sandboxDisabled = false;
 
 	constructor(private readonly session: ToolSession) {
 		this.#asyncEnabled = this.session.settings.get("async.enabled");
@@ -802,8 +820,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	 *   - Windows：直接执行（ISO FS 已隔离工作区）。
 	 *
 	 * 沙箱句柄在第一次调用时创建并 `apply()`（不可逆），后续调用复用同一
-	 * 句柄。`apply()` 失败时降级为非沙箱执行（与 Rust 侧 graceful degrade
-	 * 语义一致）。
+	 * 句柄。`apply()` 失败时抛出 `SandboxUnavailableError`，由调用处根据
+	 * `sandbox.fallbackBehavior`（error/warn/continue）决定硬失败还是降级
+	 * 为非沙箱执行。
 	 *
 	 * SandboxHandle.exec 当前不接受 `cwd` / `env` 参数（Rust 侧直接
 	 * `Command::new(cmd).args(args)`），所以 cwd 与 env 被嵌入命令行
@@ -835,15 +854,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				await handle.apply();
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				logger.warn("Sandbox apply failed; falling back to unsandboxed execution", {
-					profile: options.profile,
-					error: message,
-				});
 				this.#sandboxHandle = null;
-				throw new ToolError(
-					`Sandbox apply failed (profile=${options.profile}): ${message}. ` +
-						"Disable sandbox.enabled or change sandbox.profile to continue.",
-				);
+				// Defer the hard-fail vs. warn/continue decision to the call site,
+				// which consults `sandbox.fallbackBehavior` (error/warn/continue).
+				throw new SandboxUnavailableError(message, options.profile);
 			}
 			this.#sandboxHandle = handle;
 		}
@@ -1036,22 +1050,47 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// 跳过条件：
 		//   - `pty === true`：PTY 需要终端，沙箱 + PTY 不兼容；
 		//   - `asyncRequested`：上面已经返回；
-		//   - `sandbox.profile === "off"`：用户显式关闭沙箱。
+		//   - `sandbox.profile === "off"`：用户显式关闭沙箱；
+		//   - `#sandboxDisabled`：此前 apply 失败且 fallbackBehavior 为 warn/continue，
+		//     已降级为非沙箱执行，后续调用直接走非沙箱路径。
 		//
 		// 不跳过 client bridge 路径：当用户开启沙箱时，沙箱应优先于 editor 终端
 		// （editor 终端不提供 OS 级隔离，仅是 UI 路由）。
-		if (!pty && this.session.settings.get("sandbox.enabled")) {
+		if (!pty && !this.#sandboxDisabled && this.session.settings.get("sandbox.enabled")) {
 			const sandboxProfile = this.session.settings.get("sandbox.profile");
 			if (sandboxProfile !== "off") {
-				return await this.#runSandboxed({
-					command,
-					commandCwd,
-					env: resolvedEnv,
-					profile: sandboxProfile,
-					timeoutSec,
-					requestedTimeoutSec,
-					notices: pendingNotices,
-				});
+				try {
+					return await this.#runSandboxed({
+						command,
+						commandCwd,
+						env: resolvedEnv,
+						profile: sandboxProfile,
+						timeoutSec,
+						requestedTimeoutSec,
+						notices: pendingNotices,
+					});
+				} catch (error) {
+					// Only apply fallback semantics to sandbox-unavailable errors;
+					// rethrow everything else (e.g. ToolError from exec failures).
+					if (!(error instanceof SandboxUnavailableError)) throw error;
+					const fallback = this.session.settings.get("sandbox.fallbackBehavior");
+					if (fallback === "error") {
+						throw new ToolError(
+							`Sandbox is enabled but unavailable (profile=${error.profile}): ${error.message} ` +
+								"Set sandbox.enabled=false or sandbox.fallbackBehavior=warn to continue unsandboxed.",
+						);
+					}
+					if (fallback !== "continue") {
+						// "warn" (default): surface a warning before running unsandboxed.
+						logger.warn("Sandbox unavailable; continuing WITHOUT sandboxing", {
+							profile: error.profile,
+							error: error.message,
+						});
+					}
+					// "warn" / "continue": disable sandbox for this session and fall
+					// through to the unsandboxed execution paths below.
+					this.#sandboxDisabled = true;
+				}
 			}
 		}
 

@@ -8,6 +8,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Windows platform alignment
+
+- Windows sandbox no longer silently degrades when the ISO FS backend is
+  unavailable. `apply_windows_iso_fallback` in
+  [`crates/nexus-sandbox/src/lib.rs`](./crates/nexus-sandbox/src/lib.rs) now
+  returns a hard error so the TS layer can apply the new
+  `sandbox.fallbackBehavior` setting (`error` / `warn` / `continue`, default
+  `warn`) explicitly, instead of running unprotected with no user-visible
+  signal.
+- CI `nexus_matrix` no longer swallows Windows test failures with `|| true`.
+  The mock-provider integration step now uses `continue-on-error` for the
+  `windows-latest` matrix entry, so genuine `bun test` regressions surface
+  while the ISO FS fallback path remains non-blocking.
+- Windows release binary now gets a `wine` smoke test in CI (`--version` +
+  `--smoke-test`), best-effort via `continue-on-error` when wine is missing.
+
+### Added — WSL2 bridge
+
+- `nexus wsl` CLI command (`status` / `launch` / `install`) — start the agent
+  inside WSL2 for full Linux capabilities (Landlock sandbox, reflink
+  checkpoint, native bash). Implemented in
+  [`packages/coding-agent/src/wsl-bridge.ts`](./packages/coding-agent/src/wsl-bridge.ts)
+  (35 unit tests).
+- Windows native mode auto-detects WSL2 at startup (`detectWsl`) and suggests
+  `nexus wsl launch` when available. Suppress with `wsl.suppressHint=true`.
+- Path conversion: `windowsToWslPath` (`C:\Users\foo` → `/mnt/c/Users/foo`,
+  UNC `\\server\share` → `/mnt/server/share`) and `wslToWindowsPath` (reverse).
+- New settings: `wsl.autoDetect` (default `true`), `wsl.preferredDistro`,
+  `wsl.suppressHint` (default `false`).
+
+### Added — gRPC client API
+
+- [`packages/nexus-grpc/src/client.ts`](./packages/nexus-grpc/src/client.ts) —
+  programmatic client (`createClient`) wrapping the `Nexus.Chat` bidirectional
+  stream with `prompt` / `streamTokens` / `setModel` / `abort` convenience
+  methods.
+- Client examples for Python, Go, and Rust in
+  [`packages/nexus-grpc/examples/`](./packages/nexus-grpc/examples/).
+- `startServer` export alias for `startNexusGrpcServer`, for docs parity with
+  [`docs/integration-guide.md`](./docs/integration-guide.md).
+
 ### Added — Self-improvement layer (hermes-agent fusion)
 
 Nine capabilities fused from hermes-agent, landing as an incremental layer on

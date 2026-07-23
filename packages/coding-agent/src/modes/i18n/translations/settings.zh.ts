@@ -826,6 +826,11 @@ export const zhSettings: Record<string, SettingTranslation> = {
 		label: "违规策略",
 		description: "如何处理沙箱违规：log（记录并继续）、deny（阻止操作）、warn（记录并上报用户）",
 	},
+	"sandbox.fallbackBehavior": {
+		label: "回退行为",
+		description:
+			"沙箱已启用但 OS 后端不可用时（例如 Windows ISO FS 缺失）的处理方式：error（启动失败）、warn（记录警告并以无沙箱模式继续）、continue（静默以无沙箱模式继续）",
+	},
 	"eval.py": {
 		label: "Python Eval 后端",
 		description: "允许 eval 工具把 Python 单元派发给 IPython 内核",

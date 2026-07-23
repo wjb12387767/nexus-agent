@@ -289,16 +289,27 @@ impl SandboxManager {
         let backend = pi_iso::backend(BackendKind::native());
         let probe = backend.probe();
         if !probe.available {
+            // P0 fix: do NOT silently degrade. When the user opted into
+            // `sandbox.enabled=true` but the Windows ISO FS backend is
+            // unavailable, surface a hard error so the TS layer can apply
+            // `sandbox.fallbackBehavior` (error/warn/continue) explicitly
+            // instead of running unprotected with no user-visible signal.
+            let reason = probe.reason.as_deref().unwrap_or("unknown");
             tracing::warn!(
-                reason = ?probe.reason,
-                "Windows ISO FS backend unavailable, continuing without sandbox"
+                reason = %reason,
+                "Windows ISO FS backend unavailable; returning error (no silent degradation)"
             );
             self.logger.log(SandboxEvent::apply_failed(
                 &self.profile.to_string(),
                 workspace,
-                &probe.reason.as_deref().unwrap_or("unknown"),
+                reason,
             ));
-            return Ok(());
+            return Err(anyhow::anyhow!(
+                "Windows ISO FS sandbox backend is not available. The agent will run WITHOUT \
+                 sandboxing. To fix: (1) run in WSL2 for Landlock sandbox, (2) run in Docker \
+                 for container isolation, or (3) set sandbox.enabled=false to acknowledge \
+                 running unsandboxed."
+            ));
         }
 
         // 创建 merged 视图路径——放在 nexus_home 下以 PID 区分。

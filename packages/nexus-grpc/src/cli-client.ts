@@ -97,7 +97,7 @@ interface NexusClient {
 async function connectClient(host: string, port: number): Promise<NexusClient> {
 	const packageDefinition = await protoLoader.load(PROTO_PATH, LOADER_OPTIONS);
 	const nexusProto = grpc.loadPackageDefinition(packageDefinition) as unknown as {
-		nexus: { Nexus: new (address: string, credentials: grpc.ChannelCredentials) => { Chat: () => grpc.ClientDuplexStream<unknown, unknown> } };
+		nexus: { Nexus: new (address: string, credentials: grpc.ChannelCredentials) => { Chat: () => grpc.ClientDuplexStream<unknown, unknown>; close: () => void } };
 	};
 	const client = new nexusProto.nexus.Nexus(`${host}:${port}`, grpc.credentials.createInsecure());
 	const stream = client.Chat();

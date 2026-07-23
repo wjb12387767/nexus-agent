@@ -364,6 +364,36 @@ powershell -ExecutionPolicy Bypass -File scripts/start-services.ps1
 - **域名是占位符:** `nexus.agent`、`docs.nexus.agent`、`collab.nexus.agent` 是占位域名,不可解析。所有文档都在仓库内。
 - **构建要求:** Bun ≥ 1.3.14 + Rust ≥ 1.92.0(stable)。构建会编译 Rust NAPI 原生模块,首次约 10–20 分钟。
 
+### Windows 平台限制
+
+Nexus Agent 在 Windows 上的能力相较 Linux/macOS 有所缩减:
+
+- **沙箱:** Windows 使用 ISO FS(Projected FS)进行工作区隔离,仅提供视图合并,**没有**内核强制的 deny。Landlock(Linux)和 Seatbelt(macOS)在 Windows 上不可用。如需完整沙箱,请使用 WSL2(`nexus wsl launch`)或 Docker 模式。
+- **Checkpoint:** Windows 回退为全量文件拷贝(O(N)),而非 reflink CoW(在 Linux btrfs / macOS APFS 上为 O(1))。大型工作区的 checkpoint 会更慢、磁盘占用更高。
+- **Bash 工具:** 需要 Git for Windows(Git Bash)。没有它,bash 工具和 AST 安全分析将不可用。PowerShell 不作为 shell 后端直接支持。
+- **Docker:** Dockerfile 和 docker-compose.yml 面向 Linux 容器。Windows 用户需要带 WSL2 后端的 Docker Desktop。
+- **原生模块:** Windows .node addon 在 Linux CI runner 上交叉编译。虽然我们校验 napi 导出,并对交叉编译的二进制做尽力而为的 `wine` 烟雾测试,但 CI 中没有真正的原生 Windows 运行时烟雾测试。
+
+**推荐的 Windows 方案(按能力):**
+
+| 方案 | 沙箱 | Checkpoint | Bash/AST | 易用性 |
+|---|---|---|---|---|
+| WSL2 模式(`nexus wsl launch`) | 完整(Landlock) | 完整(reflink) | 完整(原生 bash) | 中 |
+| Docker 模式(`docker compose up`) | 完整(容器) | 完整(容器) | 完整(容器) | 简单 |
+| 原生 Windows | 受限(ISO FS) | 受限(全量拷贝) | 需 Git Bash | 最简单 |
+
+### Windows:WSL2 桥接
+
+要在 Windows 上获得完整的 Linux 能力(Landlock 沙箱、reflink checkpoint、原生 bash),请使用内置的 WSL2 桥接:
+
+```bash
+nexus wsl status    # 检测 WSL2 是否可用
+nexus wsl launch    # 在 WSL2 内启动 agent
+nexus wsl install   # 打印 WSL 内安装指引
+```
+
+在原生 Windows 模式下运行时,Nexus 会自动检测 WSL2 并在可用时建议切换。可通过 `wsl.suppressHint=true` 关闭该提示。
+
 ## 赞助
 
 如果 Nexus Agent 帮到了你,可以请作者喝杯咖啡。扫码即可:

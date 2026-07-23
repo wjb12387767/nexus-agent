@@ -1525,6 +1525,30 @@ export async function runRootCommand(
 				notifs.push(modelScopeNotification);
 			}
 
+			// Windows 原生模式：检测 WSL2 并提示用户切换以获得完整 Linux 能力
+			// （Landlock 沙箱、reflink checkpoint、原生 bash AST）。已在 WSL 内
+			// 运行时（WSL_DISTRO_NAME 存在）跳过；可用 wsl.suppressHint 关闭。
+			if (
+				process.platform === "win32" &&
+				!process.env.WSL_DISTRO_NAME &&
+				settingsInstance.get("wsl.autoDetect") &&
+				!settingsInstance.get("wsl.suppressHint")
+			) {
+				try {
+					const { detectWsl } = await import("./wsl-bridge");
+					const wslInfo = await logger.time("detectWsl", detectWsl);
+					if (wslInfo.available && wslInfo.version === 2) {
+						const distro = wslInfo.defaultDistribution ?? "WSL2";
+						notifs.push({
+							kind: "info",
+							message: `WSL2 detected (${distro}). For full capabilities (sandbox, checkpoint, bash AST), run \`nexus wsl launch\` to start inside WSL2.\nRun \`nexus wsl status\` to check WSL2 setup.`,
+						});
+					}
+				} catch {
+					// WSL 检测失败时静默跳过提示，不阻塞启动。
+				}
+			}
+
 			if ($env.PI_TIMING) {
 				logger.printTimings();
 				if (logger.shouldExitAfterTimings()) {

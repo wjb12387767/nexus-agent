@@ -73,7 +73,9 @@ export function resolveModel(modelId?: string): Model {
 	// 2. 仅 model id：跨 provider 搜索
 	if (modelId) {
 		for (const provider of getBundledProviders()) {
-			const models = getBundledModels(provider);
+			// getBundledProviders() 的返回联合比 getBundledModels 的入参联合更宽
+			// （多出 litellm 等聚合 provider），在此收窄以通过类型检查。
+			const models = getBundledModels(provider as Parameters<typeof getBundledModels>[0]);
 			const hit = models.find(m => m.id === modelId);
 			if (hit) return hit;
 		}

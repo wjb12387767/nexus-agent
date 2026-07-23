@@ -185,3 +185,58 @@ export interface NexusGrpcServer {
 	/** 优雅关闭。 */
 	shutdown(): Promise<void>;
 }
+
+// ---------------------------------------------------------
+// 编程式客户端类型（src/client.ts）
+// ---------------------------------------------------------
+
+/**
+ * `streamTokens` 产生的 token 块。
+ *
+ * 注：proto 中流式文本通过 `ServerMessage.text_chunk` 投影；此处 `TokenChunk`
+ * 是编程式客户端为 `streamTokens` 便捷方法提供的带序号视图。
+ */
+export interface TokenChunk {
+	/** token 文本。 */
+	text: string;
+	/** 该块在流中的序号（从 0 起）。 */
+	index: number;
+}
+
+/**
+ * `prompt` 便捷方法的响应：聚合完整文本与完成轮数。
+ *
+ * 对应 proto 中一次 Chat 流收齐后的汇总结果。
+ */
+export interface PromptResponse {
+	/** 聚合后的完整文本。 */
+	text: string;
+	/** 会话 ID。 */
+	sessionId: string;
+	/** 完成的 agent 轮数。 */
+	turnsCompleted: number;
+}
+
+/**
+ * `setModel` 便捷方法的响应。
+ *
+ * 在收敛后的协议中模型由 `ChatRequest.model` 指定，故 `setModel` 仅在客户端
+ * 记录偏好、作用于后续 `prompt` / `streamTokens` 调用，不发起独立 RPC。
+ */
+export interface SetModelResponse {
+	/** 是否设置成功。 */
+	success: boolean;
+	/** 失败时的错误描述。 */
+	error: string;
+}
+
+/**
+ * `abort` 便捷方法的响应。
+ *
+ * 在收敛后的协议中，中止通过在活动的 Chat 流上发送 `CancelSignal` 完成；
+ * 若无活动流则返回 `success: false`。
+ */
+export interface AbortResponse {
+	/** 是否成功发送中止信号。 */
+	success: boolean;
+}
