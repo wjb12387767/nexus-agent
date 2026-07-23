@@ -207,17 +207,28 @@ jobs:
           tauriScript: pnpm tauri
           args: --target ${{ matrix.rust_target }} --bundles deb,rpm
 
-      - name: Build Tauri app (Windows/macOS)
-        if: steps.check.outputs.skip != 'true' && matrix.platform != 'linux'
+      # macOS: No Apple Developer certificate is configured, so we build with
+      # ad-hoc signing (identity "-"). The .app/.dmg runs on any Mac but
+      # Gatekeeper shows an "unidentified developer" warning that users bypass
+      # via right-click > Open. We must NOT pass APPLE_CERTIFICATE here — an
+      # empty/undefined value makes tauri-action attempt a keychain import
+      # that fails with "SecKeychainItemImport: parameters not valid".
+      - name: Build Tauri app (macOS)
+        if: steps.check.outputs.skip != 'true' && startsWith(matrix.platform, 'macos')
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: '-'
+        with:
+          projectPath: workany-dev/workany-dev
+          tauriScript: pnpm tauri
+          args: --target ${{ matrix.rust_target }}
+
+      - name: Build Tauri app (Windows)
+        if: steps.check.outputs.skip != 'true' && matrix.platform == 'windows'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: workany-dev/workany-dev
           tauriScript: pnpm tauri
