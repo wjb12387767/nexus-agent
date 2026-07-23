@@ -64,7 +64,7 @@ jobs:
             name: macos-arm64
 
           - platform: macos-intel
-            os: macos-latest
+            os: macos-13
             rust_target: x86_64-apple-darwin
             bun_api_target: bun-darwin-x64
             nexus_cross_target: darwin-x64
@@ -127,17 +127,24 @@ jobs:
             ./workany-dev/workany-dev/src-tauri -> target
           shared-key: workany-${{ matrix.name }}
 
-      # Step 1: Build nexus CLI binary (root workspace)
-      - name: Build nexus CLI
+      # Step 1: Install deps + build Rust native modules (required by nexus CLI)
+      - name: Install deps and build native modules
         if: steps.check.outputs.skip != 'true'
         shell: bash
         run: |
           bun install --frozen-lockfile
+          bun run build:native
+          ls -la packages/natives/native/ || true
+
+      # Step 2: Build nexus CLI binary (root workspace)
+      - name: Build nexus CLI
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        run: |
           bun --cwd=packages/coding-agent run build
-          # Verify the binary was produced
           ls -la packages/coding-agent/dist/
 
-      # Step 2: Build workany-api sidecar
+      # Step 3: Build workany-api sidecar
       - name: Build workany-api sidecar (Unix)
         if: steps.check.outputs.skip != 'true' && matrix.platform != 'windows'
         shell: bash
@@ -154,7 +161,7 @@ jobs:
           mkdir -p dist
           bun build src/index.ts --compile --target=${{ matrix.bun_api_target }} --outfile dist/workany-api-${{ matrix.rust_target }}.exe
 
-      # Step 3: Copy nexus CLI into sidecar directory
+      # Step 4: Copy nexus CLI into sidecar directory
       - name: Copy nexus CLI into sidecar directory
         if: steps.check.outputs.skip != 'true'
         shell: bash
@@ -168,21 +175,21 @@ jobs:
           chmod +x "$NEXUS_DST" 2>/dev/null || true
           echo "Copied nexus CLI to $NEXUS_DST"
 
-      # Step 4: Install frontend dependencies
+      # Step 5: Install frontend dependencies
       - name: Install frontend dependencies
         if: steps.check.outputs.skip != 'true'
         run: |
           cd workany-dev/workany-dev
           pnpm install
 
-      # Step 5: Build frontend
+      # Step 6: Build frontend
       - name: Build frontend
         if: steps.check.outputs.skip != 'true'
         run: |
           cd workany-dev/workany-dev
           pnpm build
 
-      # Step 6: Build Tauri app
+      # Step 7: Build Tauri app
       - name: Build Tauri app (Linux)
         if: steps.check.outputs.skip != 'true' && matrix.platform == 'linux'
         uses: tauri-apps/tauri-action@v0
@@ -209,7 +216,7 @@ jobs:
           tauriScript: pnpm tauri
           args: --target ${{ matrix.rust_target }}
 
-      # Step 7: Upload artifacts
+      # Step 8: Upload artifacts
       - name: Upload artifacts (Linux)
         if: steps.check.outputs.skip != 'true' && matrix.platform == 'linux'
         uses: actions/upload-artifact@v4
