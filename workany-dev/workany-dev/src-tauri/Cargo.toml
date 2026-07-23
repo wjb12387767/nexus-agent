@@ -25,3 +25,10 @@ tauri-plugin-fs = "2"
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Keep this Tauri crate out of the nexus-agent root Cargo workspace.
+# Without this empty [workspace] table, `cargo metadata` run from within
+# src-tauri/ walks up to the repository root Cargo.toml and fails because
+# src-tauri is not listed in the root workspace's `members` array.
+# An empty [workspace] table makes this crate its own workspace root.
+[workspace]
