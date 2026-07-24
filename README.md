@@ -1,7 +1,9 @@
 # Nexus Agent
 
 <p align="center">
-  <strong>An open-source AI coding agent — a fusion of three flagships.</strong>
+  <strong>The industrial-grade open-source AI coding agent — four flagship agents fused into one.</strong>
+  <br>
+  <span>OS-level sandbox · self-improvement loop · 60+ tools · 50+ LLM providers · 100% local &amp; MIT</span>
   <br>
   <a href="https://github.com/wjb12387767/nexus-agent">github.com/wjb12387767/nexus-agent</a>
   <br><br>

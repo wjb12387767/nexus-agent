@@ -1,7 +1,9 @@
 # Nexus Agent
 
 <p align="center">
-  <strong>开源 AI 编码智能体 —— 三大旗舰融合</strong>
+  <strong>工业级开源 AI 编码智能体 —— 四大旗舰融合于一身</strong>
+  <br>
+  <span>操作系统级沙箱 · 自我进化循环 · 60+ 工具 · 50+ 大模型 · 100% 本地 &amp; MIT</span>
   <br>
   <a href="https://github.com/wjb12387767/nexus-agent">github.com/wjb12387767/nexus-agent</a>
   <br><br>
